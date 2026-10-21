@@ -338,6 +338,9 @@ void ble_init(void)
         return;
     }
 
+    /* NimBLE 默认对每条 GATT 操作打 INFO 日志，10 次/秒会把串口刷爆，
+     * 并且抢占 CPU / UART 带宽。这里只保留 WARNING 及以上。 */
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
     ble_hs_cfg.reset_cb          = on_reset;
     ble_hs_cfg.sync_cb           = on_sync;
     ble_hs_cfg.store_status_cb   = ble_store_util_status_rr;

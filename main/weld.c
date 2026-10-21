@@ -55,6 +55,21 @@ static void seq_cb(void *arg)
         app_state_unlock();
 
         current_sense_arm();            /* 先布好采集，再拉高，避免丢上升沿 */
+#if CONFIG_BENCH_MODE
+        /* No ADC on a bare board: synthesise a parabola-shaped envelope so the
+         * 240-byte BLE notification path can be verified end to end. */
+        app_state_t *bs = app_state_lock();
+        for (int i = 0; i < ENV_BUCKETS; i++) {
+            int64_t t = (int64_t)i * 1000 / (ENV_BUCKETS - 1);
+            int64_t v = 12000 * t * (1000 - t) / 1000000;
+            bs->env[i] = (uint16_t)v;
+        }
+        bs->env_peak = 3000;
+        bs->env_peak_idx = ENV_BUCKETS / 2;
+        bs->env_valid = true;
+        bs->env_seq++;
+        app_state_unlock();
+#endif
         s_on_us = esp_timer_get_time();
         gpio_set_level(PIN_WELD_TRIG, 1);
 
