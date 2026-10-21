@@ -25,6 +25,7 @@ static volatile TaskHandle_t s_task;
 static int64_t              s_last_off_us;
 static int64_t              s_last_trig_us;
 static int64_t              s_on_us;    /* 拉高触发脚的时刻，用于实测脉宽 */
+static uint32_t             s_pulse_us = WELD_PULSE_US;
 
 /* ---------------------------------------------------------------- ISR */
 
@@ -50,7 +51,7 @@ static void seq_cb(void *arg)
         /* 预压结束，开始放电 */
         app_state_t *st = app_state_lock();
         st->welding    = true;
-        st->pulse_us   = WELD_PULSE_US;
+        st->pulse_us   = s_pulse_us;
         app_state_unlock();
 
         current_sense_arm();            /* 先布好采集，再拉高，避免丢上升沿 */
@@ -59,7 +60,7 @@ static void seq_cb(void *arg)
 
         s_phase = PH_ON;
         esp_timer_start_once(s_guard, WELD_MAX_PULSE_US);
-        esp_timer_start_once(s_seq, WELD_PULSE_US);
+        esp_timer_start_once(s_seq, s_pulse_us);
         break;
     }
     case PH_ON: {
@@ -79,7 +80,7 @@ static void seq_cb(void *arg)
         app_state_unlock();
 
         ESP_LOGI(TAG, "关断：实测导通 %d us（标称 %d us，误差 %d us）",
-                 (int)actual, WELD_PULSE_US, (int)(actual - WELD_PULSE_US));
+                 (int)actual, (int)s_pulse_us, (int)(actual - s_pulse_us));
 
         esp_timer_start_once(s_seq, WELD_COOLDOWN_US);
         break;
@@ -96,7 +97,7 @@ static void seq_cb(void *arg)
 
 static void guard_cb(void *arg)
 {
-    /* 走到这里说明 10ms 关断没生效，无条件拉低 */
+    /* 走到这里说明正常关断没生效，无条件拉低 */
     gpio_set_level(PIN_WELD_TRIG, 0);
 
     app_state_t *st = app_state_lock();
@@ -156,10 +157,40 @@ static void weld_task(void *arg)
             continue;
         }
 
-        ESP_LOGI(TAG, "检测到脚踏，进入 200ms 预压");
+        ESP_LOGI(TAG, "检测到触发，进入 200ms 预压");
         s_phase = PH_PRECHARGE;
         esp_timer_start_once(s_seq, WELD_PRECHARGE_US);
     }
+}
+
+/* ---------------------------------------------------------------- 对外接口 */
+
+void weld_request_trigger(void)
+{
+    TaskHandle_t t = s_task;
+    if (t) {
+        xTaskNotifyGive(t);
+    }
+}
+
+void weld_set_pulse_us(uint32_t us)
+{
+    /* 留 2ms 余量给 50ms 看门狗，避免两者同时到期造成误报 */
+    const uint32_t lo = 1000;
+    const uint32_t hi = WELD_MAX_PULSE_US - 2000;
+
+    if (us < lo) {
+        us = lo;
+    }
+    if (us > hi) {
+        us = hi;
+    }
+    s_pulse_us = us;
+}
+
+uint32_t weld_get_pulse_us(void)
+{
+    return s_pulse_us;
 }
 
 /* ---------------------------------------------------------------- 初始化 */
@@ -213,6 +244,6 @@ void weld_init(void)
 #endif
 
     ESP_LOGI(TAG, "点焊控制就绪：预压 %dms / 导通 %dms / 上限 %dms / 冷却 %dms",
-             WELD_PRECHARGE_US / 1000, WELD_PULSE_US / 1000,
+             WELD_PRECHARGE_US / 1000, (int)(s_pulse_us / 1000),
              WELD_MAX_PULSE_US / 1000, WELD_COOLDOWN_US / 1000);
 }

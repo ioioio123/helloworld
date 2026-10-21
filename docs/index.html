@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ESP32-C3 点焊机</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --fg: #e6edf3; --dim: #8b949e;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --cyan: #39c5cf;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 12px; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    max-width: 520px; margin-inline: auto;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  h1 { font-size: 17px; margin: 4px 0 12px; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px; margin-bottom: 12px;
+  }
+  button {
+    font: inherit; font-weight: 600; color: #fff; background: #238636;
+    border: 0; border-radius: 8px; padding: 12px 16px; width: 100%;
+    cursor: pointer;
+  }
+  button:active { filter: brightness(.9); }
+  button.secondary { background: #21262d; border: 1px solid var(--line); }
+  button.danger { background: #b62324; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .stat { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .cell { background: #0b0f14; border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .label { font-size: 12px; color: var(--dim); letter-spacing: .04em; }
+  .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .value small { font-size: 13px; font-weight: 400; color: var(--dim); margin-left: 2px; }
+  .ok { color: var(--green); } .warn { color: var(--yellow); } .bad { color: var(--red); }
+  canvas { width: 100%; height: auto; display: block; border-radius: 8px; background: #05080b; }
+  input[type=range] { width: 100%; accent-color: var(--green); }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  .dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+</style>
+</head>
+<body>
+
+<h1>ESP32-C3 点焊机 <span class="dot" id="dot"></span></h1>
+
+<div class="panel">
+  <button id="connect">连接设备</button>
+  <div class="hint" id="status">未连接</div>
+</div>
+
+<div class="panel">
+  <div class="stat">
+    <div class="cell">
+      <div class="label">峰值电流</div>
+      <div class="value" id="peak">–<small>A</small></div>
+    </div>
+    <div class="cell">
+      <div class="label">温度</div>
+      <div class="value" id="temp">–<small>℃</small></div>
+    </div>
+    <div class="cell">
+      <div class="label">实测脉宽</div>
+      <div class="value" id="pulse">–<small>ms</small></div>
+    </div>
+    <div class="cell">
+      <div class="label">累计次数</div>
+      <div class="value" id="count">–</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="label" style="margin-bottom:8px">电流包络（240 点）</div>
+  <canvas id="chart" width="240" height="120"></canvas>
+</div>
+
+<div class="panel">
+  <div class="label" style="margin-bottom:6px">设定脉宽 <span id="pwLabel">10.0</span> ms</div>
+  <input type="range" id="pw" min="1" max="48" step="0.5" value="10">
+  <button class="secondary" id="setPw" style="margin-top:10px">下发脉宽</button>
+  <button class="danger" id="fire" style="margin-top:10px" disabled>触发放电</button>
+  <div class="hint">远程触发与脚踏走同一套安全联锁：1 秒冷却、80℃ 锁定、50ms 看门狗，任何一条不满足都会被拒绝。</div>
+</div>
+
+<script>
+const SVC  = '1a2b3c4d-0001-4a5b-8c9d-0e1f2a3b4c5d';
+const TELE = '1a2b3c4d-0002-4a5b-8c9d-0e1f2a3b4c5d';
+const ENV  = '1a2b3c4d-0003-4a5b-8c9d-0e1f2a3b4c5d';
+const CTL  = '1a2b3c4d-0004-4a5b-8c9d-0e1f2a3b4c5d';
+
+const $ = id => document.getElementById(id);
+let dev = null, ctlChr = null;
+const ctx = $('chart').getContext('2d');
+let envData = new Array(240).fill(0);
+
+function setStatus(text, cls) {
+  $('status').textContent = text;
+  $('dot').className = 'dot' + (cls ? ' on' : '');
+}
+
+function onTelemetry(dv) {
+  const s = new TextDecoder().decode(dv).trim();
+  if (!s.startsWith('W,')) return;
+  const [, peak, temp10, pulse, count, status] = s.split(',');
+  const amps = (parseInt(peak) * 0.01).toFixed(2);
+  $('peak').innerHTML = amps + '<small>A</small>';
+  $('temp').innerHTML = (parseInt(temp10) / 10).toFixed(1) + '<small>℃</small>';
+  $('pulse').innerHTML = (parseInt(pulse) / 1000).toFixed(2) + '<small>ms</small>';
+  $('count').textContent = count;
+  const st = parseInt(status);
+  if (st === 2) { $('temp').className = 'value bad'; setStatus('超温锁定，已禁止触发', true); }
+  else if (st === 1) { $('temp').className = 'value'; setStatus('正在放电…', true); }
+  else { $('temp').className = 'value'; }
+}
+
+function onEnvelope(dv) {
+  const u8 = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  for (let i = 0; i < 240 && i < u8.length; i++) envData[i] = u8[i];
+  draw();
+}
+
+function draw() {
+  const w = 240, h = 120;
+  ctx.clearRect(0, 0, w, h);
+  // 网格
+  ctx.strokeStyle = '#1b2430'; ctx.lineWidth = 1;
+  for (let g = 1; g < 4; g++) {
+    const y = h - 1 - (h - 1) * g / 4;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  // 曲线
+  ctx.strokeStyle = '#39c5cf'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let x = 0; x < w; x++) {
+    const y = h - 1 - (envData[x] / 255) * (h - 2);
+    x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+draw();
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    setStatus('此浏览器不支持 Web Bluetooth（需 Android Chrome）', false);
+    return;
+  }
+  try {
+    setStatus('搜索中…');
+    dev = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'WELDER' }],
+      optionalServices: [SVC]
+    });
+    dev.addEventListener('gattserverdisconnected', () => {
+      setStatus('连接已断开', false);
+      $('fire').disabled = true;
+      $('connect').textContent = '重新连接';
+    });
+
+    setStatus('连接中…');
+    const server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+
+    const tele = await svc.getCharacteristic(TELE);
+    const env  = await svc.getCharacteristic(ENV);
+    ctlChr     = await svc.getCharacteristic(CTL);
+
+    tele.addEventListener('characteristicvaluechanged', e => onTelemetry(e.target.value));
+    env.addEventListener('characteristicvaluechanged',  e => onEnvelope(e.target.value));
+    await tele.startNotifications();
+    await env.startNotifications();
+
+    $('fire').disabled = false;
+    $('connect').textContent = '已连接';
+    setStatus('已连接：' + dev.name, true);
+  } catch (err) {
+    setStatus('失败：' + err.message, false);
+  }
+}
+
+async function send(text) {
+  if (!ctlChr) return;
+  try {
+    await ctlChr.writeValueWithResponse(new TextEncoder().encode(text));
+  } catch (e) {
+    try { await ctlChr.writeValueWithoutResponse(new TextEncoder().encode(text)); }
+    catch (e2) { setStatus('写入失败：' + e2.message, false); }
+  }
+}
+
+$('connect').onclick = connect;
+$('fire').onclick = () => {
+  if (confirm('确认放电？')) send('F');
+};
+$('pw').oninput = e => $('pwLabel').textContent = parseFloat(e.target.value).toFixed(1);
+$('setPw').onclick = () => {
+  const us = Math.round(parseFloat($('pw').value) * 1000);
+  send('P' + us);
+  setStatus('已下发脉宽 ' + (us / 1000).toFixed(1) + ' ms', true);
+};
+</script>
+</body>
+</html>

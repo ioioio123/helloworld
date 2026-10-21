@@ -6,6 +6,7 @@ idf_component_register(
         "encoder.c"
         "weld.c"
         "display.c"
+        "ble.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_lcd
@@ -14,4 +15,6 @@ idf_component_register(
         esp_adc
         esp_timer
         soc
+        bt
+        nvs_flash
 )

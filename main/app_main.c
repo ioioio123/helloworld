@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
 
 #include "board_config.h"
 #include "app_state.h"
@@ -11,6 +12,7 @@
 #include "current_sense.h"
 #include "encoder.h"
 #include "weld.h"
+#include "ble.h"
 
 static const char *TAG = "app";
 
@@ -80,6 +82,14 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32-C3 点焊机控制器启动");
 
+    /* NVS 是 BLE 协议栈的依赖（存储 PHY 校准 / 绑定信息） */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
 #if CONFIG_BENCH_MODE
     ESP_LOGW(TAG, "===== BENCH 模式 =====");
     ESP_LOGW(TAG, "触发: 板载 BOOT 键 (GPIO9)   心跳: 板载 LED (GPIO%d)", CONFIG_BENCH_LED_GPIO);
@@ -130,6 +140,10 @@ void app_main(void)
 #if !CONFIG_BENCH_MODE
     current_sense_init();
 #endif
+
+    /* BLE 放在 weld 之后：一旦初始化完成就能接收远程触发，
+     * 此时安全联锁已经就绪，不会出现"能连上但拦不住"的窗口。 */
+    ble_init();
 
     xTaskCreate(ui_task, "ui", 4096, NULL, 5, NULL);
 
