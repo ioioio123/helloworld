@@ -128,12 +128,21 @@ static void weld_task(void *arg)
         }
         s_last_trig_us = now;
 
-        if (s_phase != PH_IDLE) {
+        /* 正在放电（预压或导通）时，忽略重复触发。
+         * 注意：这里必须单独判断，否则下面"冷却中"的分支永远不可达——
+         * 因为冷却期间 s_phase 一直是 PH_COOLDOWN。 */
+        if (s_phase == PH_PRECHARGE || s_phase == PH_ON) {
+            ESP_LOGW(TAG, "正在放电中（phase=%d），忽略重复触发", s_phase);
             continue;
         }
-        if (now - s_last_off_us < WELD_COOLDOWN_US) {
-            ESP_LOGW(TAG, "冷却中（%d ms），忽略触发",
-                     (int)((WELD_COOLDOWN_US - (now - s_last_off_us)) / 1000));
+
+        /* 冷却锁定：放电结束后 1 秒内禁止再次触发 */
+        if (s_phase == PH_COOLDOWN || (now - s_last_off_us) < WELD_COOLDOWN_US) {
+            int64_t left_us = WELD_COOLDOWN_US - (now - s_last_off_us);
+            if (left_us < 0) {
+                left_us = 0;
+            }
+            ESP_LOGW(TAG, "冷却中（剩余 %d ms），忽略触发", (int)(left_us / 1000));
             continue;
         }
 
