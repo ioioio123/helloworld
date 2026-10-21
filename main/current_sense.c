@@ -25,6 +25,8 @@ static adc_cali_handle_t      s_cali;
 static volatile bool s_armed;
 static bool          s_capturing;
 static uint32_t      s_sample_idx;
+static uint64_t      s_sum_sq;
+static uint32_t      s_n;
 static uint16_t      s_buckets[ENV_BUCKETS];
 
 /* NTC 平均 */
@@ -103,7 +105,12 @@ static void finish_capture(void)
     }
 
     app_state_t *s = app_state_lock();
+    uint32_t rms = 0;
+    if (s_n > 0) {
+        rms = (uint32_t)(sqrtf((float)((double)s_sum_sq / (double)s_n)) + 0.5f);
+    }
     memcpy(s->env, s_buckets, sizeof(s->env));
+    s->env_rms = (uint16_t)rms;
     s->env_peak = peak;
     s->env_peak_idx = peak_idx;
     s->env_valid = true;
@@ -113,7 +120,7 @@ static void finish_capture(void)
     s_capturing = false;
     s_armed = false;
 
-    ESP_LOGI(TAG, "包络完成 peak=%u @bucket %d", (unsigned)peak, peak_idx);
+    ESP_LOGI(TAG, "包络完成 peak=%u rms=%u @bucket %d", (unsigned)peak, (unsigned)rms, peak_idx);
 }
 
 static void feed_current(uint32_t raw)
@@ -125,6 +132,8 @@ static void feed_current(uint32_t raw)
         s_capturing = true;
         s_sample_idx = 0;
         memset(s_buckets, 0, sizeof(s_buckets));
+        s_sum_sq = 0;
+        s_n = 0;
     }
 
     /* 把第 s_sample_idx 个样本映射到 0..ENV_BUCKETS-1 */
@@ -132,6 +141,9 @@ static void feed_current(uint32_t raw)
     if (idx >= ENV_BUCKETS) {
         idx = ENV_BUCKETS - 1;
     }
+    s_sum_sq += (uint64_t)raw * raw;
+    s_n++;
+
     if (raw > s_buckets[idx]) {
         s_buckets[idx] = (uint16_t)raw;
     }

@@ -65,6 +65,7 @@ static void seq_cb(void *arg)
             bs->env[i] = (uint16_t)v;
         }
         bs->env_peak = 3000;
+        bs->env_rms = 1900;
         bs->env_peak_idx = ENV_BUCKETS / 2;
         bs->env_valid = true;
         bs->env_seq++;

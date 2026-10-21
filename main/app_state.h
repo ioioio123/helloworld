@@ -19,6 +19,7 @@ typedef struct {
     uint16_t env[ENV_BUCKETS];
     bool     env_valid;
     uint16_t env_peak;
+    uint16_t env_rms;        /* 有效值 RMS，同样以 ADC 计数表示 */
     int      env_peak_idx;
     uint32_t env_seq;        /* 每次新包络 +1，供 UI 判断是否重绘 */
 
