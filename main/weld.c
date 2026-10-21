@@ -56,18 +56,27 @@ static void seq_cb(void *arg)
 
         current_sense_arm();            /* 先布好采集，再拉高，避免丢上升沿 */
 #if CONFIG_BENCH_MODE
-        /* No ADC on a bare board: synthesise a parabola-shaped envelope so the
-         * 240-byte BLE notification path can be verified end to end. */
+        /* 裸板没有 ADC：合成一条抛物线包络，用于验证 240 字节通知链路。
+         * 窗口 = 脉宽 + 2ms，波形只铺在脉宽区间内，余量区保持 0。 */
         app_state_t *bs = app_state_lock();
+        uint32_t span_us = s_pulse_us + 2000;
+        int active = (int)((uint64_t)ENV_BUCKETS * s_pulse_us / span_us);
+        if (active < 2) { active = 2; }
+        if (active > ENV_BUCKETS) { active = ENV_BUCKETS; }
+
         for (int i = 0; i < ENV_BUCKETS; i++) {
-            int64_t t = (int64_t)i * 1000 / (ENV_BUCKETS - 1);
-            int64_t v = 12000 * t * (1000 - t) / 1000000;
-            bs->env[i] = (uint16_t)v;
+            if (i < active) {
+                int64_t t = (int64_t)i * 1000 / (active - 1);
+                bs->env[i] = (uint16_t)(12000 * t * (1000 - t) / 1000000);
+            } else {
+                bs->env[i] = 0;
+            }
         }
-        bs->env_peak = 3000;
-        bs->env_rms = 1900;
-        bs->env_peak_idx = ENV_BUCKETS / 2;
-        bs->env_valid = true;
+        bs->env_span_us  = span_us;
+        bs->env_peak     = 3000;    /* 3000 counts x 0.6667 A/count = 2000 A */
+        bs->env_rms      = 1900;    /* 约 1266 A；抛物线波形的有效值/峰值 ≈ 0.63 */
+        bs->env_peak_idx = active / 2;
+        bs->env_valid    = true;
         bs->env_seq++;
         app_state_unlock();
 #endif
