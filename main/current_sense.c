@@ -14,6 +14,7 @@
 #include "board_config.h"
 #include "app_state.h"
 #include "current_sense.h"
+#include "weld.h"
 
 static const char *TAG = "adc";
 
@@ -27,6 +28,8 @@ static bool          s_capturing;
 static uint32_t      s_sample_idx;
 static uint64_t      s_sum_sq;
 static uint32_t      s_n;
+static uint32_t      s_capture_samples = ENV_CAPTURE_SAMPLES;
+static uint32_t      s_window_us       = ENV_CAPTURE_MS * 1000;
 static uint16_t      s_buckets[ENV_BUCKETS];
 
 /* NTC 平均 */
@@ -115,6 +118,7 @@ static void finish_capture(void)
     s->env_peak_idx = peak_idx;
     s->env_valid = true;
     s->env_seq++;
+    s->env_span_us = s_window_us;
     app_state_unlock();
 
     s_capturing = false;
@@ -137,7 +141,7 @@ static void feed_current(uint32_t raw)
     }
 
     /* 把第 s_sample_idx 个样本映射到 0..ENV_BUCKETS-1 */
-    uint32_t idx = (uint32_t)(((uint64_t)s_sample_idx * ENV_BUCKETS) / ENV_CAPTURE_SAMPLES);
+    uint32_t idx = (uint32_t)(((uint64_t)s_sample_idx * ENV_BUCKETS) / s_capture_samples);
     if (idx >= ENV_BUCKETS) {
         idx = ENV_BUCKETS - 1;
     }
@@ -149,7 +153,7 @@ static void feed_current(uint32_t raw)
     }
 
     s_sample_idx++;
-    if (s_sample_idx >= ENV_CAPTURE_SAMPLES) {
+    if (s_sample_idx >= s_capture_samples) {
         finish_capture();
     }
 }
@@ -217,9 +221,23 @@ static void adc_task(void *arg)
 
 void current_sense_arm(void)
 {
+    /* 抓取窗口跟随当前脉宽：前后留余量，缩短窗口让曲线更"放大"，
+     * 同时保证 48ms 的长脉宽也不会被截断。 */
+    const uint32_t MARGIN_US = 2000;
+    const uint32_t MIN_US    = 2000;
+    const uint32_t MAX_US    = 60000;
+
+    uint32_t win = weld_get_pulse_us() + MARGIN_US;
+    if (win < MIN_US) { win = MIN_US; }
+    if (win > MAX_US) { win = MAX_US; }
+
+    s_window_us       = win;
+    s_capture_samples = (uint32_t)((uint64_t)ADC_SAMPLE_FREQ_HZ * win / 2000000ULL);
+    if (s_capture_samples == 0) { s_capture_samples = 1; }
+
     s_sample_idx = 0;
-    s_capturing = false;
-    s_armed = true;
+    s_capturing  = false;
+    s_armed      = true;
 }
 
 void current_sense_init(void)

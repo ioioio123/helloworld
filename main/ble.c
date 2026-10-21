@@ -60,6 +60,7 @@ static void refresh_telemetry(void)
     app_state_t *s = app_state_lock();
     uint16_t peak   = s->env_peak;
     uint16_t rms    = s->env_rms;
+    uint32_t span   = s->env_span_us;
     float    temp   = s->temp_c;
     uint32_t pulse  = s->pulse_us;
     uint32_t count  = s->weld_count;
@@ -68,13 +69,14 @@ static void refresh_telemetry(void)
     app_state_unlock();
 
     int status = locked ? 2 : (weld ? 1 : 0);
-    snprintf(s_tele_buf, sizeof(s_tele_buf), "W,%u,%u,%d,%lu,%lu,%d\n",
+    snprintf(s_tele_buf, sizeof(s_tele_buf), "W,%u,%u,%d,%lu,%lu,%d,%lu\n",
              (unsigned)peak,
              (unsigned)rms,
              (int)(temp * 10.0f),
              (unsigned long)pulse,
              (unsigned long)count,
-             status);
+             status,
+             (unsigned long)span);
 }
 
 static void notify_chr(uint16_t handle, const void *data, uint16_t len)

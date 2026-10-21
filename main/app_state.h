@@ -20,6 +20,7 @@ typedef struct {
     bool     env_valid;
     uint16_t env_peak;
     uint16_t env_rms;        /* 有效值 RMS，同样以 ADC 计数表示 */
+    uint32_t env_span_us;    /* 本次包络覆盖的时间窗口（跟随脉宽自适应） */
     int      env_peak_idx;
     uint32_t env_seq;        /* 每次新包络 +1，供 UI 判断是否重绘 */
 

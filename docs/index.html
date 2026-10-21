@@ -7,7 +7,7 @@
 <title>ESP32-C3 点焊机</title>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --line: #30363d; --grid: #1c2430;
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
     --fg: #e6edf3; --dim: #8b949e;
     --green: #3fb950; --red: #f85149; --yellow: #d29922; --cyan: #39c5cf;
   }
@@ -40,10 +40,7 @@
   button.danger { background: #b62324; }
   button:disabled { opacity: .4; cursor: not-allowed; }
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .cell {
-    background: #0b0f14; border: 1px solid var(--line);
-    border-radius: 10px; padding: 9px 11px;
-  }
+  .cell { background: #0b0f14; border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
   .cell.wide { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; }
   .label { font-size: 11.5px; color: var(--dim); letter-spacing: .05em; }
   .value { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.25; }
@@ -54,6 +51,8 @@
   input[type=range] { width: 100%; accent-color: var(--green); margin: 4px 0 10px; }
   .hint { font-size: 11.5px; color: var(--dim); margin-top: 8px; line-height: 1.45; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
 </style>
 </head>
 <body>
@@ -96,9 +95,14 @@
 <div class="panel">
   <div class="panel-title">
     <span>电流包络</span>
-    <span id="win">0 – 20 ms</span>
+    <span id="win">– ms 窗口</span>
   </div>
-  <canvas id="chart" width="340" height="190"></canvas>
+  <canvas id="chart" width="360" height="200"></canvas>
+  <div class="legend">
+    <span><i style="background:#39c5cf"></i>瞬时电流</span>
+    <span><i style="background:rgba(248,81,73,.85)"></i>峰值位置</span>
+    <span><i style="background:rgba(63,185,80,.25)"></i>放电窗口</span>
+  </div>
 </div>
 
 <div class="panel">
@@ -109,14 +113,15 @@
     <button class="danger" id="fire" disabled>触发放电</button>
   </div>
   <div class="hint">
-    远程触发与脚踏共用同一套安全联锁：1 秒冷却、80℃ 锁定、50ms 看门狗。任何一条不满足都会被拒绝。
+    远程触发与脚踏共用同一套安全联锁：1 秒冷却、80℃ 锁定、50ms 看门狗。
   </div>
 </div>
 
 <script>
-/* ---------- 配置 ---------- */
-const A_PER_COUNT = 0.01;      // 与固件 CURRENT_A_PER_COUNT 保持一致
-const CAPTURE_MS  = 20;        // 与固件 ENV_CAPTURE_MS 保持一致
+/* ---------- 配置（与固件保持一致） ---------- */
+const A_PER_COUNT = 0.01;       // CURRENT_A_PER_COUNT
+const RAW_MAX     = 4095;       // 12bit ADC
+const BUCKETS     = 240;        // ENV_BUCKETS
 const SVC  = '1a2b3c4d-0001-4a5b-8c9d-0e1f2a3b4c5d';
 const TELE = '1a2b3c4d-0002-4a5b-8c9d-0e1f2a3b4c5d';
 const ENV  = '1a2b3c4d-0003-4a5b-8c9d-0e1f2a3b4c5d';
@@ -125,115 +130,133 @@ const CTL  = '1a2b3c4d-0004-4a5b-8c9d-0e1f2a3b4c5d';
 const $ = id => document.getElementById(id);
 const cv = $('chart');
 const ctx = cv.getContext('2d');
-const W = cv.width, H = cv.height;
-const PAD = { l: 42, r: 10, t: 12, b: 24 };
-const PW = W - PAD.l - PAD.r;
-const PH = H - PAD.t - PAD.b;
+const CW = cv.width, CH = cv.height;
+const PAD = { l: 52, r: 12, t: 16, b: 30 };
+const PW = CW - PAD.l - PAD.r;
+const PH = CH - PAD.t - PAD.b;
 
 let dev = null, ctlChr = null;
-let envA = new Array(240).fill(0);
-let peakA = 0, rmsA = 0, yMax = 10;
+let envA       = new Array(BUCKETS).fill(0);
+let envPeakIdx = 0;
+let peakA = 0, rmsA = 0, pulseMs = 10;
+let spanMs = 12;            // 由固件遥测下发
+let yMax = 10;
 
-/* ---------- 工具 ---------- */
+const fmt = (v, d) => v.toFixed(d);
+
 function niceMax(v) {
   if (!(v > 0)) return 10;
   const steps = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
   const mag = Math.pow(10, Math.floor(Math.log10(v)));
-  for (const s of steps) {
-    const c = s * mag;
-    if (c >= v * 1.08) return c;
-  }
+  for (const s of steps) { const c = s * mag; if (c >= v * 1.08) return c; }
   return 10 * mag;
 }
-const fmtY = v => (yMax <= 10 ? v.toFixed(1) : Math.round(v).toString());
 
 /* ---------- 绘图 ---------- */
 function draw() {
-  ctx.clearRect(0, 0, W, H);
+  ctx.clearRect(0, 0, CW, CH);
 
   const x0 = PAD.l, y0 = PAD.t, x1 = PAD.l + PW, y1 = PAD.t + PH;
-  const xAt = i => x0 + (i / 239) * PW;
+  const xAt = i => x0 + (i / (BUCKETS - 1)) * PW;
   const yAt = a => y1 - (Math.min(a, yMax) / yMax) * PH;
 
-  /* 水平网格 + Y 轴刻度 */
-  ctx.font = '10px ui-monospace, Menlo, Consolas, monospace';
+  /* 放电窗口底色 */
+  const pulseX = x0 + Math.min(pulseMs / spanMs, 1) * PW;
+  ctx.fillStyle = 'rgba(63,185,80,0.10)';
+  ctx.fillRect(x0, y0, pulseX - x0, PH);
+
+  /* Y 网格 + 刻度 */
+  ctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  const yDiv = 4;
-  for (let i = 0; i <= yDiv; i++) {
-    const v = yMax * i / yDiv;
-    const y = y1 - (PH * i / yDiv);
+  const yd = 4;
+  for (let i = 0; i <= yd; i++) {
+    const v = yMax * i / yd;
+    const y = y1 - (PH * i / yd);
     ctx.strokeStyle = i === 0 ? '#2b3440' : '#161d27';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x0, y + 0.5); ctx.lineTo(x1, y + 0.5); ctx.stroke();
-    ctx.fillStyle = '#7d8590';
-    ctx.fillText(fmtY(v), x0 - 6, y);
+    ctx.fillStyle = '#9aa4b2';
+    ctx.fillText(v.toFixed(yMax <= 5 ? 2 : (yMax <= 20 ? 1 : 0)), x0 - 7, y);
   }
 
-  /* 垂直网格 + X 轴刻度 */
+  /* X 网格 + 刻度 */
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  const xDiv = 4;
-  for (let i = 0; i <= xDiv; i++) {
-    const x = x0 + PW * i / xDiv;
+  const xd = 4;
+  for (let i = 0; i <= xd; i++) {
+    const t = spanMs * i / xd;
+    const x = x0 + PW * i / xd;
     ctx.strokeStyle = '#161d27';
     ctx.beginPath(); ctx.moveTo(x + 0.5, y0); ctx.lineTo(x + 0.5, y1); ctx.stroke();
-    ctx.fillStyle = '#7d8590';
-    ctx.fillText(String(Math.round(CAPTURE_MS * i / xDiv)), x, y1 + 6);
+    ctx.fillStyle = '#9aa4b2';
+    ctx.fillText(t.toFixed(t < 10 ? 1 : 0), x, y1 + 7);
   }
 
-  /* 轴标签 */
-  ctx.fillStyle = '#5c6570';
-  ctx.textAlign = 'left';
-  ctx.fillText('A', x0 - 30, y0 - 2);
+  /* 轴标题（明显可见） */
+  ctx.save();
+  ctx.fillStyle = '#c9d1d9';
+  ctx.font = '600 11px -apple-system, "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.translate(13, y0 + PH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('电流 (A)', 0, 0);
+  ctx.restore();
+
+  ctx.fillStyle = '#c9d1d9';
+  ctx.font = '600 11px -apple-system, "Segoe UI", sans-serif';
   ctx.textAlign = 'right';
-  ctx.fillText('ms', x1, y1 + 6);
+  ctx.textBaseline = 'top';
+  ctx.fillText('时间 (ms)', x1, y1 + 15);
 
   /* 曲线填充 */
   const grad = ctx.createLinearGradient(0, y0, 0, y1);
-  grad.addColorStop(0, 'rgba(57,197,207,0.32)');
+  grad.addColorStop(0, 'rgba(57,197,207,0.34)');
   grad.addColorStop(1, 'rgba(57,197,207,0.02)');
   ctx.beginPath();
   ctx.moveTo(xAt(0), y1);
-  for (let i = 0; i < 240; i++) ctx.lineTo(xAt(i), yAt(envA[i]));
-  ctx.lineTo(xAt(239), y1);
+  for (let i = 0; i < BUCKETS; i++) ctx.lineTo(xAt(i), yAt(envA[i]));
+  ctx.lineTo(xAt(BUCKETS - 1), y1);
   ctx.closePath();
   ctx.fillStyle = grad;
   ctx.fill();
 
   /* 曲线 */
   ctx.beginPath();
-  for (let i = 0; i < 240; i++) {
+  for (let i = 0; i < BUCKETS; i++) {
     const x = xAt(i), y = yAt(envA[i]);
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   }
   ctx.strokeStyle = '#39c5cf';
-  ctx.lineWidth = 1.6;
+  ctx.lineWidth = 1.7;
   ctx.lineJoin = 'round';
   ctx.stroke();
 
-  /* 峰值标记 */
-  let pk = 0, pi = 0;
-  for (let i = 0; i < 240; i++) if (envA[i] > pk) { pk = envA[i]; pi = i; }
-  if (pk > 0.2) {
-    const px = xAt(pi);
+  /* 峰值定位线：数值用遥测里的精确峰值，位置用包络里最大桶 */
+  if (peakA > 0.05) {
+    const px = xAt(envPeakIdx);
     ctx.save();
-    ctx.setLineDash([3, 3]);
-    ctx.strokeStyle = 'rgba(248,81,73,0.85)';
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(248,81,73,0.9)';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(px + 0.5, y0); ctx.lineTo(px + 0.5, y1); ctx.stroke();
     ctx.restore();
 
-    ctx.fillStyle = '#f85149';
-    ctx.beginPath(); ctx.arc(px, yAt(pk), 2.6, 0, Math.PI * 2); ctx.fill();
-
-    ctx.textAlign = px > W - 60 ? 'right' : 'left';
+    const text = '峰值 ' + peakA.toFixed(2) + ' A @ ' + (envPeakIdx / (BUCKETS - 1) * spanMs).toFixed(1) + ' ms';
+    ctx.font = '10px ui-monospace, Menlo, Consolas, monospace';
+    const tw = ctx.measureText(text).width;
+    const tx = Math.min(Math.max(px + 5, x0 + 2), x1 - tw - 2);
+    ctx.fillStyle = 'rgba(248,81,73,0.16)';
+    ctx.fillRect(tx - 3, y0 + 1, tw + 6, 14);
+    ctx.fillStyle = '#ff8b84';
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText(pk.toFixed(1) + 'A', px + (px > W - 60 ? -4 : 4), y0 + 1);
+    ctx.fillText(text, tx, y0 + 3);
   }
 }
 
-/* ---------- 数据处理 ---------- */
+/* ---------- 数据 ---------- */
 function onTelemetry(dv) {
   const s = new TextDecoder().decode(dv).trim();
   if (!s.startsWith('W,')) return;
@@ -246,14 +269,20 @@ function onTelemetry(dv) {
   const pulseUs = parseInt(f[4]) || 0;
   const count   = f[5];
   const status  = parseInt(f[6]) || 0;
+  const spanUs  = f.length >= 8 ? (parseInt(f[7]) || 0) : 0;
 
-  peakA = peakRaw * A_PER_COUNT;
-  rmsA  = rmsRaw  * A_PER_COUNT;
+  peakA   = peakRaw * A_PER_COUNT;
+  rmsA    = rmsRaw  * A_PER_COUNT;
+  pulseMs = pulseUs / 1000;
+  if (spanUs > 0) {
+    spanMs = spanUs / 1000;
+    $('win').textContent = spanMs.toFixed(0) + ' ms 窗口（脉宽 ' + pulseMs.toFixed(1) + ' ms）';
+  }
 
-  $('peak').innerHTML = peakA.toFixed(2) + '<small>A</small>';
-  $('rms').innerHTML  = rmsA.toFixed(2) + '<small>A</small>';
-  $('temp').innerHTML = (temp10 / 10).toFixed(1) + '<small>℃</small>';
-  $('pulse').innerHTML = (pulseUs / 1000).toFixed(2) + '<small>ms</small>';
+  $('peak').innerHTML  = peakA.toFixed(2) + '<small>A</small>';
+  $('rms').innerHTML   = rmsA.toFixed(2) + '<small>A</small>';
+  $('temp').innerHTML  = (temp10 / 10).toFixed(1) + '<small>℃</small>';
+  $('pulse').innerHTML = pulseMs.toFixed(2) + '<small>ms</small>';
   $('count').textContent = count;
 
   $('temp').className = temp10 < -200 ? 'value sm bad' : 'value sm';
@@ -262,15 +291,19 @@ function onTelemetry(dv) {
   else if (status === 1) setStatus('正在放电…', true);
 
   const y = niceMax(Math.max(peakA, 1));
-  if (y !== yMax) { yMax = y; draw(); } else { draw(); }
+  if (y !== yMax) yMax = y;
+  draw();
 }
 
 function onEnvelope(dv) {
   const u8 = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  for (let i = 0; i < 240; i++) {
-    envA[i] = i < u8.length ? (u8[i] / 255) * 4095 * A_PER_COUNT : 0;
+  let best = 0;
+  for (let i = 0; i < BUCKETS; i++) {
+    const raw = i < u8.length ? u8[i] : 0;
+    envA[i] = raw / 255 * RAW_MAX * A_PER_COUNT;
+    if (envA[i] > best) { best = envA[i]; envPeakIdx = i; }
   }
-  const y = niceMax(Math.max(peakA, ...envA, 1));
+  const y = niceMax(Math.max(peakA, best, 1));
   if (y !== yMax) yMax = y;
   draw();
 }
@@ -283,7 +316,7 @@ function setStatus(text, on) {
 /* ---------- 连接 ---------- */
 async function connect() {
   if (!navigator.bluetooth) {
-    setStatus('此浏览器不支持 Web Bluetooth（需 Android Chrome，且为 HTTPS）', false);
+    setStatus('此浏览器不支持 Web Bluetooth（需 Android Chrome + HTTPS）', false);
     return;
   }
   try {
@@ -323,18 +356,15 @@ async function connect() {
 async function send(text) {
   if (!ctlChr) return;
   const bytes = new TextEncoder().encode(text);
-  try {
-    await ctlChr.writeValueWithResponse(bytes);
-  } catch (e1) {
+  try { await ctlChr.writeValueWithResponse(bytes); }
+  catch (e1) {
     try { await ctlChr.writeValueWithoutResponse(bytes); }
     catch (e2) { setStatus('写入失败：' + e2.message, false); }
   }
 }
 
 $('connect').onclick = connect;
-$('fire').onclick = () => {
-  if (confirm('确认放电？')) send('F');
-};
+$('fire').onclick = () => { if (confirm('确认放电？')) send('F'); };
 $('pw').oninput = e => $('pwLabel').textContent = parseFloat(e.target.value).toFixed(1) + ' ms';
 $('setPw').onclick = () => {
   const us = Math.round(parseFloat($('pw').value) * 1000);
