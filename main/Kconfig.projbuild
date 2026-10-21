@@ -1,0 +1,33 @@
+menu "点焊机控制器"
+
+    config BENCH_MODE
+        bool "裸板自测模式（仅板载 LED + BOOT 按键）"
+        default n
+        help
+            板子上暂时没有任何外设时使用。
+
+            开启后的行为：
+              * GPIO9（板载 BOOT 键）作为点焊触发输入，蜂鸣器输出关闭
+              * 板载 LED 以 1Hz 心跳闪烁，证明任务在跑
+              * 跳过 ST7789 与 ADC 初始化（无外设，避免无意义占用）
+              * 旁路 NTC 超温锁定
+
+            按下 BOOT 会走完 200ms 预压 -> 10ms 放电的完整时序，
+            并在串口打印实测导通时间，可用来验证 esp_timer 精度与安全联锁。
+
+            正式硬件请关闭此项。
+
+    config BENCH_LED_GPIO
+        int "板载 LED 的 GPIO 编号"
+        range 0 21
+        default 8
+        depends on BENCH_MODE
+        help
+            ESP32-C3 Super Mini 的板载蓝色 LED 通常接在 GPIO8。
+
+    config BENCH_LED_ACTIVE_LOW
+        bool "板载 LED 低电平点亮"
+        default y
+        depends on BENCH_MODE
+
+endmenu

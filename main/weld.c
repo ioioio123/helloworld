@@ -24,6 +24,7 @@ static volatile int         s_phase = PH_IDLE;
 static volatile TaskHandle_t s_task;
 static int64_t              s_last_off_us;
 static int64_t              s_last_trig_us;
+static int64_t              s_on_us;    /* 拉高触发脚的时刻，用于实测脉宽 */
 
 /* ---------------------------------------------------------------- ISR */
 
@@ -53,6 +54,7 @@ static void seq_cb(void *arg)
         app_state_unlock();
 
         current_sense_arm();            /* 先布好采集，再拉高，避免丢上升沿 */
+        s_on_us = esp_timer_get_time();
         gpio_set_level(PIN_WELD_TRIG, 1);
 
         s_phase = PH_ON;
@@ -65,13 +67,19 @@ static void seq_cb(void *arg)
         gpio_set_level(PIN_WELD_TRIG, 0);
         esp_timer_stop(s_guard);
 
-        s_last_off_us = esp_timer_get_time();
-        s_phase = PH_COOLDOWN;
+        int64_t off_us = esp_timer_get_time();
+        int64_t actual = off_us - s_on_us;
+        s_last_off_us  = off_us;
+        s_phase        = PH_COOLDOWN;
 
         app_state_t *st = app_state_lock();
         st->welding     = false;
         st->weld_count++;
+        st->pulse_us    = (uint32_t)actual;     /* 实测值，不是标称值 */
         app_state_unlock();
+
+        ESP_LOGI(TAG, "关断：实测导通 %d us（标称 %d us，误差 %d us）",
+                 (int)actual, WELD_PULSE_US, (int)(actual - WELD_PULSE_US));
 
         esp_timer_start_once(s_seq, WELD_COOLDOWN_US);
         break;
@@ -160,7 +168,8 @@ void weld_init(void)
     ESP_ERROR_CHECK(gpio_config(&out));
     gpio_set_level(PIN_WELD_TRIG, 0);
 
-    /* 脚踏：上拉输入，下降沿中断 */
+    /* 脚踏：上拉输入，下降沿中断。
+     * BENCH 模式下 PIN_FOOT 被改写为 GPIO9（板载 BOOT 键）。 */
     gpio_config_t in = {
         .pin_bit_mask = (1ULL << PIN_FOOT),
         .mode         = GPIO_MODE_INPUT,
@@ -189,6 +198,10 @@ void weld_init(void)
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_FOOT, foot_isr, NULL));
 
     s_last_off_us = esp_timer_get_time() - WELD_COOLDOWN_US;
+
+#if CONFIG_BENCH_MODE
+    ESP_LOGW(TAG, "BENCH: 触发源 = 板载 BOOT 键 (GPIO%d)", PIN_FOOT);
+#endif
 
     ESP_LOGI(TAG, "点焊控制就绪：预压 %dms / 导通 %dms / 上限 %dms / 冷却 %dms",
              WELD_PRECHARGE_US / 1000, WELD_PULSE_US / 1000,

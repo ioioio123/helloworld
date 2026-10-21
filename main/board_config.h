@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "hal/adc_types.h"
 
@@ -46,7 +47,8 @@
 #define LCD_PARAM_BITS      8
 
 /* GPIO9：蜂鸣器（NPN 驱动）。
- * 注意：这是 C3 的 strapping 脚，复位瞬间必须为高，外部电路不能把它拉死。 */
+ * 注意：这是 C3 的 strapping 脚，复位瞬间必须为高，外部电路不能把它拉死。
+ * 在 BENCH 模式下该脚被征用为 BOOT 按键输入，见文件末尾。 */
 #define PIN_BUZZER          GPIO_NUM_9
 
 /* GPIO10：点焊触发（光耦 + 图腾柱）。硬件必须 10k 下拉，防上电误触。 */
@@ -106,3 +108,14 @@
 #define COLOR_CYAN    RGB565(0, 48, 31)
 #define COLOR_YELLOW  RGB565(31, 63, 0)
 #define COLOR_ORANGE  RGB565(31, 32, 0)
+
+/* ====================== 裸板自测模式（BENCH） ======================
+ * menuconfig: Component config -> 点焊机控制器 -> 裸板自测模式
+ * 开启后借用 BOOT 按键（GPIO9）当触发源，GPIO9 不能再驱动蜂鸣器。 */
+#if CONFIG_BENCH_MODE
+#undef  PIN_FOOT
+#define PIN_FOOT        GPIO_NUM_9              /* 板载 BOOT 键 */
+#define PIN_BENCH_LED   ((gpio_num_t)CONFIG_BENCH_LED_GPIO)
+#define BENCH_LED_ON    (CONFIG_BENCH_LED_ACTIVE_LOW ? 0 : 1)
+#define BENCH_LED_OFF   (!BENCH_LED_ON)
+#endif
