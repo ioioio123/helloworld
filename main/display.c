@@ -14,6 +14,7 @@
 
 #include "board_config.h"
 #include "cn_font.h"
+#include "whale_anim.h"
 #include "display.h"
 
 static const char *TAG = "lcd";
@@ -511,7 +512,7 @@ esp_err_t display_init(void)
 
     esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = PIN_LCD_RST,
-        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,
+        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_RGB,
         .data_endian    = LCD_RGB_DATA_ENDIAN_BIG,
         .bits_per_pixel = 16,
     };
@@ -582,4 +583,68 @@ void display_render(const app_state_t *s)
         blit(0, ENV_Y, ENV_W, ENV_Y + ENV_H, s_envbuf);
         last_seq = s->env_seq;
     }
+}
+
+/* ------------------------------------------------------------ 开机动画 */
+
+#define ANIM_BAND 40
+_Static_assert(ANIM_BAND * 240 <= 240 * 84, "band exceeds env buffer");
+
+void display_boot_anim(void)
+{
+    /* 纵向挤压（锚定底部）+ 横向膨胀，sx = 1/s^0.6 预先查表 */
+    static const float k_s[]  = { 1.00f, 1.04f, 1.08f, 0.96f, 0.88f, 0.92f, 0.97f, 1.00f };
+    static const float k_sx[] = { 1.000f, 0.977f, 0.955f, 1.025f, 1.080f, 1.051f, 1.018f, 1.000f };
+    static int16_t xmap[LCD_H_RES];
+    static int16_t ymap[LCD_V_RES];
+
+    /* 面板上电后需要时间稳定：过早刷屏会出现色偏（实测约 500ms） */
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    const int PHASES = 8;
+
+    for (int loop = 0; loop < 2; loop++) {
+        for (int p = 0; p < PHASES; p++) {
+            float s  = k_s[p];
+            float sx = k_sx[p];
+
+            for (int x = 0; x < LCD_H_RES; x++) {
+                float xs = ((float)x - LCD_H_RES / 2.0f) / sx + LCD_H_RES / 2.0f;
+                int xi = (int)xs;
+                if (xi < 0) {
+                    xi = 0;
+                } else if (xi > LCD_H_RES - 1) {
+                    xi = LCD_H_RES - 1;
+                }
+                xmap[x] = (int16_t)xi;
+            }
+            for (int y = 0; y < LCD_V_RES; y++) {
+                int   yb = LCD_V_RES - 1 - y;
+                float ys = (float)yb / s;
+                if (ys > LCD_V_RES - 1) {
+                    ys = LCD_V_RES - 1;      /* 边缘钳制，避免顶部露黑边 */
+                }
+                ymap[y] = (int16_t)(LCD_V_RES - 1 - (int)ys);
+            }
+
+            for (int y0 = 0; y0 < LCD_V_RES; y0 += ANIM_BAND) {
+                int rows = LCD_V_RES - y0;
+                if (rows > ANIM_BAND) {
+                    rows = ANIM_BAND;
+                }
+                for (int r = 0; r < rows; r++) {
+                    int src_row = (int)ymap[y0 + r] * LCD_H_RES;
+                    uint16_t *dst = &s_envbuf[r * LCD_H_RES];
+                    for (int x = 0; x < LCD_H_RES; x++) {
+                        dst[x] = be16(g_whale_frame[src_row + (int)xmap[x]]);
+                    }
+                }
+                blit(0, y0, LCD_H_RES, y0 + rows, s_envbuf);
+            }
+            vTaskDelay(pdMS_TO_TICKS(90));
+        }
+    }
+
+    /* 动画铺满全屏，结束后清干净，避免主界面露出残留 */
+    fill_rect(0, 0, LCD_H_RES, LCD_V_RES, COLOR_BLACK);
 }

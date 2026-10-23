@@ -44,7 +44,7 @@
 #define LCD_V_RES           240
 /* 40MHz：接线确认无误后提速，刷新约为 20MHz 的两倍。
  * 若出现花屏/噪点，说明杜邦线质量或接触不够，退回 20MHz。 */
-#define LCD_PIXEL_CLOCK_HZ  (40 * 1000 * 1000)
+#define LCD_PIXEL_CLOCK_HZ  (20 * 1000 * 1000)
 #define LCD_CMD_BITS        8
 #define LCD_PARAM_BITS      8
 

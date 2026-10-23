@@ -49,4 +49,10 @@ menu "点焊机控制器"
 
             开启后：触发源改为板载 BOOT 键（GPIO9），蜂鸣器停用，
             ADC 采集跳过，放电后生成合成包络。屏幕/蓝牙/EC11 照常工作。
+    config BOOT_ANIM
+        bool "开机动画（鲸鱼娘，约 13.8KB flash）"
+        default y
+        help
+            开机播放约 1.3 秒的 Q 版鲸鱼娘动画。点阵为 96x96 四色，
+            6 帧共 13824 字节；运行时复用显示缓冲，不额外占用 RAM。
 endmenu

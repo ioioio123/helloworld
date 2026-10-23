@@ -131,6 +131,9 @@ void app_main(void)
 
 #if !CONFIG_BENCH_MODE
     ESP_ERROR_CHECK(display_init());
+#if CONFIG_BOOT_ANIM
+    display_boot_anim();
+#endif
 #endif
 
     /* GPIO 中断服务必须先安装，encoder/weld 都要用它 */
