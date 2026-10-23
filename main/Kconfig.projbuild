@@ -30,4 +30,23 @@ menu "点焊机控制器"
         default y
         depends on BENCH_MODE
 
+    config BYPASS_TEMP_LOCK
+        bool "旁路超温锁定（未接 NTC 时使用）"
+        default n
+        help
+            未连接 NTC 热敏电阻时，温度读数必然异常，固件会按超温处理并
+            永久锁定，导致无法触发放电。
+
+            开启此项会跳过该锁定，仅用于分步调试。**接上 NTC 后必须关闭**，
+            否则失去超温保护。
+
+    config SIM_WELD
+        bool "模拟点焊（无电流传感器时用合成波形）"
+        default n
+        help
+            没有接罗氏线圈时，用合成包络代替真实采样，用于验证屏幕显示、
+            BLE 曲线与点焊时序。
+
+            开启后：触发源改为板载 BOOT 键（GPIO9），蜂鸣器停用，
+            ADC 采集跳过，放电后生成合成包络。屏幕/蓝牙/EC11 照常工作。
 endmenu

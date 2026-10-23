@@ -3,6 +3,9 @@
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
@@ -10,24 +13,58 @@
 #include "esp_lcd_panel_st7789.h"
 
 #include "board_config.h"
+#include "cn_font.h"
 #include "display.h"
 
 static const char *TAG = "lcd";
 
 static esp_lcd_panel_handle_t s_panel;
-static uint16_t *s_line;        /* 单行像素缓冲，必须 DMA 可访问 */
-static uint16_t *s_envbuf;      /* 包络区域整块缓冲 */
+static SemaphoreHandle_t s_blit_done;
+static uint16_t *s_envbuf;         /* 包络缓冲，兼作填充暂存 */
+static uint16_t s_cnbuf[16 * 16];  /* 单个汉字缓冲 */
 
-#define ENV_W      LCD_H_RES
-#define ENV_H      88
-#define ENV_Y      68
-#define ENV_BYTES  (ENV_W * ENV_H * sizeof(uint16_t))
+/* ---------------- 布局（240x240） ---------------- */
+#define MARGIN_X      6
 
-/* ------------------------------------------------------------ 基础绘制 */
+#define STATUS_Y      2
+#define STATUS_H      22
+
+#define PEAK_LABEL_Y  26
+#define PEAK_NUM_Y    44
+#define PEAK_H        46
+#define PEAK_W        26
+#define PEAK_T        7
+#define PEAK_RIGHT    200
+#define PEAK_UNIT_X   206
+
+#define ENV_Y         94
+#define ENV_H         84
+#define ENV_W         LCD_H_RES
+
+#define INFO_Y        182
+#define PULSE_Y       206
+#define BOT_H         20
+
+/* ------------------------------------------------------------ blit */
+
+static bool IRAM_ATTR on_color_done(esp_lcd_panel_io_handle_t io,
+                                    esp_lcd_panel_io_event_data_t *edata,
+                                    void *ctx)
+{
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_blit_done, &woken);
+    return (woken == pdTRUE);
+}
+
+/* draw_bitmap 只是排队，缓冲区在传输完成前不能复用 */
+static void blit(int x0, int y0, int x1, int y1, const void *buf)
+{
+    esp_lcd_panel_draw_bitmap(s_panel, x0, y0, x1, y1, buf);
+    xSemaphoreTake(s_blit_done, pdMS_TO_TICKS(200));
+}
 
 static inline uint16_t be16(uint16_t c)
 {
-    /* ST7789 默认大端（RAMCTRL 0xf0），驱动不做字节交换 */
     return (uint16_t)((c >> 8) | (c << 8));
 }
 
@@ -42,11 +79,20 @@ static void fill_rect(int x, int y, int w, int h, uint16_t color)
     }
 
     uint16_t c = be16(color);
-    for (int i = 0; i < w; i++) {
-        s_line[i] = c;
+    int chunk = ENV_H;
+    if (chunk > h) {
+        chunk = h;
     }
-    for (int j = 0; j < h; j++) {
-        esp_lcd_panel_draw_bitmap(s_panel, x, y + j, x + w, y + j + 1, s_line);
+    int n = w * chunk;
+    for (int i = 0; i < n; i++) {
+        s_envbuf[i] = c;
+    }
+    for (int done = 0; done < h; done += chunk) {
+        int rows = h - done;
+        if (rows > chunk) {
+            rows = chunk;
+        }
+        blit(x, y + done, x + w, y + done + rows, s_envbuf);
     }
 }
 
@@ -58,22 +104,18 @@ typedef struct {
 } glyph_t;
 
 static const glyph_t s_font[] = {
+    { '0', { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E } },
+    { '1', { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E } },
+    { '2', { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F } },
+    { '3', { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E } },
+    { '4', { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 } },
+    { '5', { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E } },
+    { '6', { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E } },
+    { '7', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 } },
+    { '8', { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E } },
+    { '9', { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C } },
     { 'A', { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } },
     { 'C', { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E } },
-    { 'D', { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E } },
-    { 'E', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F } },
-    { 'I', { 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E } },
-    { 'K', { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 } },
-    { 'L', { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F } },
-    { 'M', { 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 } },
-    { 'N', { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 } },
-    { 'O', { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
-    { 'P', { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 } },
-    { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 } },
-    { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
-    { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
-    { 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
-    { 'W', { 0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11 } },
     { 'm', { 0x00, 0x00, 0x1A, 0x15, 0x15, 0x11, 0x11 } },
     { 's', { 0x00, 0x00, 0x0F, 0x10, 0x0E, 0x01, 0x1E } },
 };
@@ -112,6 +154,82 @@ static void draw_text(int x, int y, int scale, const char *str, uint16_t color)
     }
 }
 
+static int text_width(int scale, const char *str)
+{
+    return (int)strlen(str) * 6 * scale - scale;
+}
+
+/* ------------------------------------------------------------ 中文点阵 */
+
+static bool utf8_next(const char **pp, uint16_t *cp)
+{
+    const unsigned char *p = (const unsigned char *)*pp;
+    if (*p == 0) {
+        return false;
+    }
+    if (*p < 0x80) {
+        *cp = *p;
+        *pp += 1;
+        return true;
+    }
+    if ((*p & 0xE0) == 0xC0 && p[1]) {
+        *cp = (uint16_t)(((p[0] & 0x1F) << 6) | (p[1] & 0x3F));
+        *pp += 2;
+        return true;
+    }
+    if ((*p & 0xF0) == 0xE0 && p[1] && p[2]) {
+        *cp = (uint16_t)(((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F));
+        *pp += 3;
+        return true;
+    }
+    *pp += 1;
+    return false;
+}
+
+static const uint8_t *cn_glyph_find(uint16_t cp)
+{
+    for (int i = 0; i < g_cn_glyph_count; i++) {
+        if (g_cn_glyphs[i].code == cp) {
+            return g_cn_glyphs[i].bmp;
+        }
+    }
+    return NULL;
+}
+
+static void draw_cn_char(int x, int y, uint16_t cp, uint16_t fg)
+{
+    const uint8_t *bmp = cn_glyph_find(cp);
+    if (!bmp) {
+        return;
+    }
+    uint16_t f = be16(fg);
+    uint16_t b = be16(COLOR_BLACK);
+
+    for (int r = 0; r < 16; r++) {
+        uint8_t hi = bmp[r * 2];
+        uint8_t lo = bmp[r * 2 + 1];
+        for (int c = 0; c < 16; c++) {
+            int set = (c < 8) ? (hi & (1 << (7 - c))) : (lo & (1 << (15 - c)));
+            s_cnbuf[r * 16 + c] = set ? f : b;
+        }
+    }
+    blit(x, y, x + 16, y + 16, s_cnbuf);
+}
+
+static void draw_cn_text(int x, int y, const char *s, uint16_t fg)
+{
+    const char *p = s;
+    int cx = x;
+    uint16_t cp;
+    while (*p) {
+        if (!utf8_next(&p, &cp)) {
+            break;
+        }
+        draw_cn_char(cx, y, cp, fg);
+        cx += 16;
+    }
+}
+
 /* ------------------------------------------------------------ 七段数码管 */
 
 static const uint8_t s_seg_map[10] = {
@@ -124,16 +242,30 @@ static void draw_digit(int x, int y, int w, int h, int t, int d, uint16_t color)
         return;
     }
     uint8_t m = s_seg_map[d];
-    if (m & 0x01) { fill_rect(x + t, y, w - 2 * t, t, color); }                  /* a */
-    if (m & 0x02) { fill_rect(x + w - t, y + t, t, h / 2 - t, color); }          /* b */
-    if (m & 0x04) { fill_rect(x + w - t, y + h / 2, t, h / 2 - t, color); }      /* c */
-    if (m & 0x08) { fill_rect(x + t, y + h - t, w - 2 * t, t, color); }          /* d */
-    if (m & 0x10) { fill_rect(x, y + h / 2, t, h / 2 - t, color); }              /* e */
-    if (m & 0x20) { fill_rect(x, y + t, t, h / 2 - t, color); }                  /* f */
-    if (m & 0x40) { fill_rect(x + t, y + h / 2 - t / 2, w - 2 * t, t, color); }  /* g */
+    if (m & 0x01) { fill_rect(x + t, y, w - 2 * t, t, color); }
+    if (m & 0x02) { fill_rect(x + w - t, y + t, t, h / 2 - t, color); }
+    if (m & 0x04) { fill_rect(x + w - t, y + h / 2, t, h / 2 - t, color); }
+    if (m & 0x08) { fill_rect(x + t, y + h - t, w - 2 * t, t, color); }
+    if (m & 0x10) { fill_rect(x, y + h / 2, t, h / 2 - t, color); }
+    if (m & 0x20) { fill_rect(x, y + t, t, h / 2 - t, color); }
+    if (m & 0x40) { fill_rect(x + t, y + h / 2 - t / 2, w - 2 * t, t, color); }
 }
 
-/* 按 "12.3" 这种字符串渲染，数字用七段，'.' 画成点 */
+static int number_width(int dw, const char *s)
+{
+    int w = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p >= '0' && *p <= '9') {
+            w += dw + 2;
+        } else if (*p == '.' || *p == '-') {
+            w += 6;
+        } else {
+            w += dw / 2;
+        }
+    }
+    return w;
+}
+
 static void draw_number(int x, int y, int dw, int dh, int t, const char *s, uint16_t color)
 {
     int cx = x;
@@ -144,68 +276,207 @@ static void draw_number(int x, int y, int dw, int dh, int t, const char *s, uint
         } else if (*p == '.') {
             fill_rect(cx, y + dh - t, t, t, color);
             cx += 6;
+        } else if (*p == '-') {
+            fill_rect(cx, y + dh / 2 - t / 2, dw / 2, t, color);
+            cx += 6;
         } else {
             cx += dw / 2;
         }
     }
 }
 
-/* ------------------------------------------------------------ 包络曲线 */
-
-static void env_clear(uint16_t color)
+static void draw_number_right(int x_right, int y, int dw, int dh, int t, const char *s, uint16_t color)
 {
-    uint16_t c = be16(color);
-    for (int i = 0; i < ENV_W * ENV_H; i++) {
-        s_envbuf[i] = c;
-    }
+    draw_number(x_right - number_width(dw, s), y, dw, dh, t, s, color);
 }
 
-static void env_px(int x, int y, uint16_t color)
+/* ------------------------------------------------------------ 包络（带坐标轴） */
+
+/* 直接往包络缓冲里写字符（1:1 像素，仅支持 scale=1） */
+static void env_char(int x, int y, char c, uint16_t color)
 {
-    if (x < 0 || y < 0 || x >= ENV_W || y >= ENV_H) {
+    const uint8_t *rows = glyph_find(c);
+    if (!rows) {
         return;
     }
-    s_envbuf[y * ENV_W + x] = be16(color);
+    uint16_t v = be16(color);
+    for (int r = 0; r < 7; r++) {
+        for (int b = 0; b < 5; b++) {
+            if (rows[r] & (1 << (4 - b))) {
+                int px = x + b;
+                int py = y + r;
+                if (px >= 0 && px < ENV_W && py >= 0 && py < ENV_H) {
+                    s_envbuf[py * ENV_W + px] = v;
+                }
+            }
+        }
+    }
 }
+
+static void env_text(int x, int y, const char *s, uint16_t color)
+{
+    int cx = x;
+    for (const char *p = s; *p; p++) {
+        env_char(cx, y, *p, color);
+        cx += 6;
+    }
+}
+
+/* 绘图区（留出左侧 Y 轴标签、下方 X 轴标签） */
+#define PLOT_X0  28
+#define PLOT_X1  (ENV_W - 2)
+#define PLOT_Y0  2
+#define PLOT_Y1  (ENV_H - 14)
 
 static void env_render(const app_state_t *s)
 {
-    env_clear(COLOR_BLACK);
+    uint16_t bg = be16(COLOR_BLACK);
+    for (int i = 0; i < ENV_W * ENV_H; i++) {
+        s_envbuf[i] = bg;
+    }
 
-    /* 水平网格 */
-    for (int g = 1; g < 4; g++) {
-        int y = ENV_H - 1 - (ENV_H - 1) * g / 4;
-        for (int x = 0; x < ENV_W; x++) {
-            env_px(x, y, COLOR_DKGREY);
+    /* 网格 */
+    for (int g = 0; g <= 4; g++) {
+        int y = PLOT_Y1 - (PLOT_Y1 - PLOT_Y0) * g / 4;
+        uint16_t c = be16(g == 0 ? COLOR_GREY : COLOR_DKGREY);
+        for (int x = PLOT_X0; x <= PLOT_X1; x++) {
+            s_envbuf[y * ENV_W + x] = c;
+        }
+    }
+    for (int g = 0; g <= 4; g++) {
+        int x = PLOT_X0 + (PLOT_X1 - PLOT_X0) * g / 4;
+        uint16_t c = be16(g == 0 ? COLOR_GREY : COLOR_DKGREY);
+        for (int y = PLOT_Y0; y <= PLOT_Y1; y++) {
+            s_envbuf[y * ENV_W + x] = c;
         }
     }
 
-    int prev_y = ENV_H - 1;
+    /* Y 轴刻度：满量程 / 半量程 / 0（单位 A） */
+    int fs_a = (int)(4095 * CURRENT_A_PER_COUNT);
+    char lbl[16];
+    snprintf(lbl, sizeof(lbl), "%d", fs_a);
+    env_text(2, PLOT_Y0 - 1, lbl, COLOR_GREY);
+    snprintf(lbl, sizeof(lbl), "%d", fs_a / 2);
+    env_text(2, (PLOT_Y0 + PLOT_Y1) / 2 - 3, lbl, COLOR_GREY);
+    env_text(2, PLOT_Y1 - 7, "0", COLOR_GREY);
+
+    /* X 轴刻度：0 与窗口末端（单位 ms） */
+    uint32_t span_us = s->env_span_us ? s->env_span_us : 20000;
+    int span_ms = (int)(span_us / 1000);
+    env_text(PLOT_X0, PLOT_Y1 + 3, "0", COLOR_GREY);
+    snprintf(lbl, sizeof(lbl), "%dms", span_ms);
+    env_text(PLOT_X1 - text_width(1, lbl), PLOT_Y1 + 3, lbl, COLOR_GREY);
+
+    /* 曲线 */
+    int prev_y = PLOT_Y1;
     for (int i = 0; i < ENV_BUCKETS; i++) {
-        int y = ENV_H - 1 - (int)((uint32_t)s->env[i] * (ENV_H - 1) / 4095u);
+        int x = PLOT_X0 + (PLOT_X1 - PLOT_X0) * i / (ENV_BUCKETS - 1);
+        int y = PLOT_Y1 - (int)((uint32_t)s->env[i] * (PLOT_Y1 - PLOT_Y0) / 4095u);
         int y0 = prev_y < y ? prev_y : y;
         int y1 = prev_y < y ? y : prev_y;
+        uint16_t c = be16(COLOR_CYAN);
         for (int yy = y0; yy <= y1; yy++) {
-            env_px(i, yy, COLOR_CYAN);
+            if (yy >= PLOT_Y0 && yy <= PLOT_Y1) {
+                s_envbuf[yy * ENV_W + x] = c;
+            }
         }
         prev_y = y;
     }
 
     /* 峰值标记 */
-    if (s->env_valid) {
-        int x = s->env_peak_idx;
-        for (int yy = 0; yy < ENV_H; yy += 3) {
-            env_px(x, yy, COLOR_RED);
-            env_px(x + 1, yy, COLOR_RED);
+    if (s->env_valid && s->env_peak > 0) {
+        int x = PLOT_X0 + (PLOT_X1 - PLOT_X0) * s->env_peak_idx / (ENV_BUCKETS - 1);
+        uint16_t c = be16(COLOR_RED);
+        for (int yy = PLOT_Y0; yy <= PLOT_Y1; yy += 4) {
+            s_envbuf[yy * ENV_W + x] = c;
         }
     }
 }
 
-/* ------------------------------------------------------------ 对外接口 */
+/* ------------------------------------------------------------ 各区域 */
+
+static void draw_status(int status)
+{
+    fill_rect(0, STATUS_Y, 140, STATUS_H, COLOR_BLACK);
+    if (status == 2) {
+        draw_cn_text(MARGIN_X, STATUS_Y, "锁定", COLOR_RED);
+    } else if (status == 1) {
+        draw_cn_text(MARGIN_X, STATUS_Y, "放电", COLOR_YELLOW);
+    } else {
+        draw_cn_text(MARGIN_X, STATUS_Y, "就绪", COLOR_GREEN);
+    }
+}
+
+static void draw_count(uint32_t count)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%lu", (unsigned long)count);
+
+    fill_rect(146, STATUS_Y, LCD_H_RES - 146, STATUS_H, COLOR_BLACK);
+    draw_cn_text(146, STATUS_Y, "次数", COLOR_GREY);
+    draw_text(180, STATUS_Y + 4, 2, buf, COLOR_WHITE);
+}
+
+static void draw_peak(int32_t peak10)
+{
+    char buf[16];
+    if (peak10 >= 1000) {
+        snprintf(buf, sizeof(buf), "%ld", (long)(peak10 / 10));
+    } else {
+        snprintf(buf, sizeof(buf), "%ld.%ld", (long)(peak10 / 10), (long)(peak10 % 10));
+    }
+
+    fill_rect(0, PEAK_LABEL_Y, LCD_H_RES, PEAK_NUM_Y + PEAK_H - PEAK_LABEL_Y, COLOR_BLACK);
+    draw_cn_text(MARGIN_X, PEAK_LABEL_Y, "峰值电流", COLOR_GREY);
+
+    draw_number_right(PEAK_RIGHT, PEAK_NUM_Y, PEAK_W, PEAK_H, PEAK_T, buf, COLOR_CYAN);
+    draw_text(PEAK_UNIT_X, PEAK_NUM_Y + PEAK_H - 16, 2, "A", COLOR_GREY);
+}
+
+static void draw_info(int32_t t10, int32_t rms10)
+{
+    char buf[16];
+
+    fill_rect(0, INFO_Y, LCD_H_RES, BOT_H + 2, COLOR_BLACK);
+
+    /* 左：温度 */
+    draw_cn_text(MARGIN_X, INFO_Y, "温度", COLOR_GREY);
+    if (t10 <= -900) {
+        snprintf(buf, sizeof(buf), "---");
+    } else if (t10 < 0) {
+        snprintf(buf, sizeof(buf), "-%ld.%ld", (long)((-t10) / 10), (long)((-t10) % 10));
+    } else {
+        snprintf(buf, sizeof(buf), "%ld.%ld", (long)(t10 / 10), (long)(t10 % 10));
+    }
+    draw_number_right(104, INFO_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
+    draw_text(108, INFO_Y + 2, 1, "C", COLOR_GREY);
+
+    /* 右：有效电流 */
+    draw_cn_text(124, INFO_Y, "有效", COLOR_GREY);
+    if (rms10 >= 1000) {
+        snprintf(buf, sizeof(buf), "%ld", (long)(rms10 / 10));
+    } else {
+        snprintf(buf, sizeof(buf), "%ld.%ld", (long)(rms10 / 10), (long)(rms10 % 10));
+    }
+    draw_number_right(222, INFO_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
+    draw_text(226, INFO_Y + 2, 1, "A", COLOR_GREY);
+}
+
+static void draw_pulse(int32_t p10)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%ld.%ld", (long)(p10 / 10), (long)(p10 % 10));
+
+    fill_rect(0, PULSE_Y, LCD_H_RES, BOT_H + 2, COLOR_BLACK);
+    draw_cn_text(MARGIN_X, PULSE_Y, "脉宽", COLOR_GREY);
+    draw_number_right(190, PULSE_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
+    draw_text(195, PULSE_Y + 2, 1, "ms", COLOR_GREY);
+}
+
+/* ------------------------------------------------------------ 初始化 */
 
 esp_err_t display_init(void)
 {
-    /* 1. SPI 总线 */
     spi_bus_config_t buscfg = {
         .sclk_io_num     = PIN_LCD_SCLK,
         .mosi_io_num     = PIN_LCD_MOSI,
@@ -216,7 +487,6 @@ esp_err_t display_init(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    /* 2. 面板 IO：CS=GPIO6, DC=GPIO7 */
     esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .cs_gpio_num       = PIN_LCD_CS,
@@ -229,9 +499,18 @@ esp_err_t display_init(void)
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &io));
 
-    /* 3. ST7789 面板（v6.1 自带驱动，不需要外部组件） */
+    s_blit_done = xSemaphoreCreateBinary();
+    if (!s_blit_done) {
+        ESP_LOGE(TAG, "创建 blit 信号量失败");
+        return ESP_ERR_NO_MEM;
+    }
+    const esp_lcd_panel_io_callbacks_t io_cbs = {
+        .on_color_trans_done = on_color_done,
+    };
+    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io, &io_cbs, NULL));
+
     esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = PIN_LCD_RST,          /* -1：RES 硬连 3.3V */
+        .reset_gpio_num = PIN_LCD_RST,
         .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,
         .data_endian    = LCD_RGB_DATA_ENDIAN_BIG,
         .bits_per_pixel = 16,
@@ -239,96 +518,68 @@ esp_err_t display_init(void)
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io, &panel_cfg, &s_panel));
 
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-    /* 多数 240x240 ST7789 模组出厂是反显，这里打开反色；
-     * 若颜色整体反了，把下面这一行改成 false 即可。 */
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, true));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
 
-    /* 4. 绘制缓冲：必须放在 DMA 可访问的内存里 */
-    s_line = (uint16_t *)spi_bus_dma_memory_alloc(LCD_HOST, LCD_H_RES * sizeof(uint16_t), 0);
-    s_envbuf = (uint16_t *)spi_bus_dma_memory_alloc(LCD_HOST, ENV_BYTES, 0);
-    if (!s_line || !s_envbuf) {
-        ESP_LOGE(TAG, "显示缓冲分配失败（line=%p env=%p）", s_line, s_envbuf);
+    s_envbuf = (uint16_t *)spi_bus_dma_memory_alloc(LCD_HOST, ENV_W * ENV_H * sizeof(uint16_t), 0);
+    if (!s_envbuf) {
+        ESP_LOGE(TAG, "显示缓冲分配失败");
         return ESP_ERR_NO_MEM;
     }
 
     fill_rect(0, 0, LCD_H_RES, LCD_V_RES, COLOR_BLACK);
-    draw_text(4, 4, 2, "PEAK", COLOR_GREY);
 
-    ESP_LOGI(TAG, "ST7789 240x240 就绪（SPI2 / SCK=4 MOSI=5 CS=6 DC=7）");
+    ESP_LOGI(TAG, "ST7789 240x240 就绪（%d MHz）", LCD_PIXEL_CLOCK_HZ / 1000000);
     return ESP_OK;
 }
 
 void display_render(const app_state_t *s)
 {
-    static int32_t  last_peak   = 0x7FFFFFFF;
-    static int32_t  last_temp   = 0x7FFFFFFF;
-    static int32_t  last_pulse  = 0x7FFFFFFF;
-    static int32_t  last_status = 0x7FFFFFFF;
+    static int32_t  last_status = -1;
+    static int32_t  last_count  = -1;
+    static int32_t  last_peak   = -1;
+    static int32_t  last_temp   = -1;
+    static int32_t  last_rms    = -1;
+    static int32_t  last_pulse  = -1;
     static uint32_t last_seq    = 0xFFFFFFFF;
-    char buf[16];
 
-    /* ---- 峰值电流（0.1A 分辨率） ---- */
-    int32_t peak = s->env_valid
-                 ? (int32_t)((float)s->env_peak * CURRENT_A_PER_COUNT * 10.0f + 0.5f)
-                 : 0;
-    if (peak != last_peak) {
-        fill_rect(0, 22, LCD_H_RES, 46, COLOR_BLACK);
-        snprintf(buf, sizeof(buf), "%4d.%d",
-                 (int)(peak / 10), (int)(peak % 10));
-        draw_number(8, 22, 26, 44, 6, buf, COLOR_CYAN);
-        last_peak = peak;
+    int32_t status = s->temp_locked ? 2 : (s->welding ? 1 : 0);
+    int32_t count  = (int32_t)s->weld_count;
+
+    if (status != last_status) {
+        draw_status(status);
+        last_status = status;
+        draw_count((uint32_t)count);
+        last_count = count;
+    }
+    if (count != last_count) {
+        draw_count((uint32_t)count);
+        last_count = count;
     }
 
-    /* ---- 包络曲线 ---- */
+    int32_t peak10 = s->env_valid ? (int32_t)(s->env_peak * CURRENT_A_PER_COUNT * 10.0f + 0.5f) : 0;
+    if (peak10 != last_peak) {
+        draw_peak(peak10);
+        last_peak = peak10;
+    }
+
+    int32_t t10   = (s->temp_c > -100.0f) ? (int32_t)(s->temp_c * 10.0f) : -999;
+    int32_t rms10 = s->env_valid ? (int32_t)(s->env_rms * CURRENT_A_PER_COUNT * 10.0f + 0.5f) : 0;
+    if (t10 != last_temp || rms10 != last_rms) {
+        draw_info(t10, rms10);
+        last_temp = t10;
+        last_rms  = rms10;
+    }
+
+    int32_t p10 = (int32_t)(s->pulse_us / 100);
+    if (p10 != last_pulse) {
+        draw_pulse(p10);
+        last_pulse = p10;
+    }
+
     if (s->env_seq != last_seq) {
         env_render(s);
-        esp_lcd_panel_draw_bitmap(s_panel, 0, ENV_Y, ENV_W, ENV_Y + ENV_H, s_envbuf);
+        blit(0, ENV_Y, ENV_W, ENV_Y + ENV_H, s_envbuf);
         last_seq = s->env_seq;
     }
-
-    /* ---- 温度 ---- */
-    int32_t temp10 = (s->temp_c > -100.0f) ? (int32_t)(s->temp_c * 10.0f) : -999;
-    if (temp10 != last_temp) {
-        fill_rect(0, 160, LCD_H_RES, 18, COLOR_BLACK);
-        draw_text(4, 162, 2, "T", COLOR_GREY);
-        if (temp10 > -900) {
-            snprintf(buf, sizeof(buf), "%3d.%d", (int)(temp10 / 10), (int)(temp10 % 10));
-        } else {
-            snprintf(buf, sizeof(buf), "---.-");
-        }
-        draw_number(28, 160, 10, 18, 2, buf, s->temp_locked ? COLOR_RED : COLOR_GREEN);
-        draw_text(104, 162, 2, "C", COLOR_GREY);
-        last_temp = temp10;
-    }
-
-    /* ---- 脉宽 ---- */
-    int32_t pulse10 = (int32_t)(s->pulse_us / 100);
-    if (pulse10 != last_pulse) {
-        fill_rect(120, 160, LCD_H_RES - 120, 18, COLOR_BLACK);
-        draw_text(124, 162, 2, "P", COLOR_GREY);
-        snprintf(buf, sizeof(buf), "%3d.%d", (int)(pulse10 / 10), (int)(pulse10 % 10));
-        draw_number(148, 160, 10, 18, 2, buf, COLOR_WHITE);
-        draw_text(200, 162, 1, "ms", COLOR_GREY);
-        last_pulse = pulse10;
-    }
-
-    /* ---- 状态 ---- */
-    int32_t status = s->temp_locked ? 2 : (s->welding ? 1 : 0);
-    if (status != last_status) {
-        fill_rect(0, 182, LCD_H_RES, 20, COLOR_BLACK);
-        if (status == 0) {
-            draw_text(4, 184, 2, "READY", COLOR_GREEN);
-        } else if (status == 1) {
-            draw_text(4, 184, 2, "WELD", COLOR_YELLOW);
-        } else {
-            draw_text(4, 184, 2, "LOCK", COLOR_RED);
-        }
-        last_status = status;
-    }
-
-    /* ---- 累计次数 ---- */
-    fill_rect(0, 206, LCD_H_RES, 20, COLOR_BLACK);
-    snprintf(buf, sizeof(buf), "N %lu", (unsigned long)s->weld_count);
-    draw_text(4, 208, 2, buf, COLOR_WHITE);
 }

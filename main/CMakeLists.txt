@@ -6,6 +6,7 @@ idf_component_register(
         "encoder.c"
         "weld.c"
         "display.c"
+        "cn_font.c"
         "ble.c"
     INCLUDE_DIRS "."
     REQUIRES

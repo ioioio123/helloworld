@@ -80,6 +80,14 @@ static void publish_temperature(void)
 
     /* 长时间没有有效读数就当作传感器故障，按超温处理最安全 */
     bool fault = (t < -50.0f || t > 300.0f);
+#if CONFIG_BENCH_MODE || CONFIG_BYPASS_TEMP_LOCK
+    /* 没有接 NTC 时旁路超温锁定，否则温度永远判故障、永远无法触发 */
+    app_state_t *s = app_state_lock();
+    s->temp_c = t;
+    s->temp_locked = false;
+    app_state_unlock();
+    (void)fault;
+#else
     if (fault) {
         ESP_LOGW(TAG, "NTC 读数异常 raw=%" PRIu32 " t=%.1f (按超温处理)", avg_raw, t);
     }
@@ -92,6 +100,7 @@ static void publish_temperature(void)
         s->temp_locked = true;
     }
     app_state_unlock();
+#endif
 }
 
 /* ---------------------------------------------------------------- 包络 */

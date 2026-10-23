@@ -55,7 +55,7 @@ static void seq_cb(void *arg)
         app_state_unlock();
 
         current_sense_arm();            /* 先布好采集，再拉高，避免丢上升沿 */
-#if CONFIG_BENCH_MODE
+#if CONFIG_BENCH_MODE || CONFIG_SIM_WELD
         /* 裸板没有 ADC：合成一条抛物线包络，用于验证 240 字节通知链路。
          * 窗口 = 脉宽 + 2ms，波形只铺在脉宽区间内，余量区保持 0。 */
         app_state_t *bs = app_state_lock();

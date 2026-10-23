@@ -104,6 +104,8 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(gpio_config(&led));
     bench_led_set(0);
+#elif CONFIG_SIM_WELD
+    /* 模拟点焊模式：GPIO9 用作触发输入，不驱动蜂鸣器 */
 #else
     /* 蜂鸣器：空闲拉低（静音），响时拉高。GPIO9 是 strapping 脚，
      * 若外部电路会在上电瞬间把它拉低，请务必检查，否则会进下载模式。 */
@@ -137,7 +139,7 @@ void app_main(void)
     encoder_init();
     weld_init();
 
-#if !CONFIG_BENCH_MODE
+#if !CONFIG_BENCH_MODE && !CONFIG_SIM_WELD
     current_sense_init();
 #endif
 
@@ -147,7 +149,7 @@ void app_main(void)
 
     xTaskCreate(ui_task, "ui", 4096, NULL, 5, NULL);
 
-#if !CONFIG_BENCH_MODE
+#if !CONFIG_BENCH_MODE && !CONFIG_SIM_WELD
     beep(60);
 #endif
 
