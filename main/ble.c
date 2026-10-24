@@ -62,14 +62,16 @@ static void refresh_telemetry(void)
     uint16_t rms    = s->env_rms;
     uint32_t span   = s->env_span_us;
     float    temp   = s->temp_c;
-    uint32_t pulse  = s->pulse_us;
+    uint32_t p1     = s->pulse1_us;
+    uint32_t p2     = s->pulse2_us;
+    uint32_t pulse  = s->pulse2_meas_us;
     uint32_t count  = s->weld_count;
     bool     locked = s->temp_locked;
     bool     weld   = s->welding;
     app_state_unlock();
 
     int status = locked ? 2 : (weld ? 1 : 0);
-    snprintf(s_tele_buf, sizeof(s_tele_buf), "W,%u,%u,%d,%lu,%lu,%d,%lu,%lu\n",
+    snprintf(s_tele_buf, sizeof(s_tele_buf), "W,%u,%u,%d,%lu,%lu,%d,%lu,%lu,%lu,%lu\n",
              (unsigned)peak,
              (unsigned)rms,
              (int)(temp * 10.0f),
@@ -77,7 +79,9 @@ static void refresh_telemetry(void)
              (unsigned long)count,
              status,
              (unsigned long)span,
-             (unsigned long)(CURRENT_A_PER_COUNT * 10000.0f));
+             (unsigned long)(CURRENT_A_PER_COUNT * 10000.0f),
+             (unsigned long)p1,
+             (unsigned long)p2);
 }
 
 static void notify_chr(uint16_t handle, const void *data, uint16_t len)
@@ -123,9 +127,9 @@ static void handle_command(const char *cmd)
     case 'P':
     case 'p': {
         uint32_t req = (uint32_t)strtoul(cmd + 1, NULL, 10);
-        weld_set_pulse_us(req);
+        weld_set_pulse_us(1, req);
         ESP_LOGI(TAG, "远程设脉宽 %lu us -> 实际 %lu us",
-                 (unsigned long)req, (unsigned long)weld_get_pulse_us());
+                 (unsigned long)req, (unsigned long)weld_get_pulse_us(1));
         refresh_telemetry();
         break;
     }

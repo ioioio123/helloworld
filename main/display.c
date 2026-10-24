@@ -25,24 +25,22 @@ static uint16_t *s_envbuf;         /* 包络缓冲，兼作填充暂存 */
 static uint16_t s_cnbuf[16 * 16];  /* 单个汉字缓冲 */
 
 /* ---------------- 布局（240x240） ---------------- */
-#define MARGIN_X      6
+#define MARGIN_X      8
 
-#define STATUS_Y      2
-#define STATUS_H      22
+#define STATUS_Y      4
+#define STATUS_H      20
 
-#define PEAK_LABEL_Y  26
-#define PEAK_NUM_Y    44
-#define PEAK_H        46
-#define PEAK_W        26
-#define PEAK_T        7
-#define PEAK_RIGHT    200
-#define PEAK_UNIT_X   206
+#define SET_Y         26        /* 脉冲1/2 设定行 */
+#define SET_H         18
+#define PEAK_LABEL_Y  50
+#define PEAK_NUM_Y    66
+#define PEAK_NUM_H    30
 
-#define ENV_Y         94
-#define ENV_H         84
+#define ENV_Y         100
+#define ENV_H         100
 #define ENV_W         LCD_H_RES
 
-#define INFO_Y        182
+#define INFO_Y        206
 #define PULSE_Y       206
 #define BOT_H         20
 
@@ -329,6 +327,20 @@ static void env_text(int x, int y, const char *s, uint16_t color)
 #define PLOT_Y0  2
 #define PLOT_Y1  (ENV_H - 14)
 
+/* 选一个 5/10 整数倍的满量程；至少 5A 便于小电流观察 */
+static int nice_full_scale(int peak_a)
+{
+    static const int steps[] = { 5, 10, 20, 25, 50, 75, 100, 150, 200, 250,
+                                 300, 400, 500, 750, 1000, 1500, 2000, 2500, 3000 };
+    int want = peak_a + peak_a / 8 + 1;
+    for (unsigned i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        if (want <= steps[i]) {
+            return steps[i];
+        }
+    }
+    return steps[sizeof(steps) / sizeof(steps[0]) - 1];
+}
+
 static void env_render(const app_state_t *s)
 {
     uint16_t bg = be16(COLOR_BLACK);
@@ -336,24 +348,31 @@ static void env_render(const app_state_t *s)
         s_envbuf[i] = bg;
     }
 
-    /* 网格 */
+    /* 网格：外框实线，内部参考线为浅灰虚线（3 亮 3 暗） */
     for (int g = 0; g <= 4; g++) {
         int y = PLOT_Y1 - (PLOT_Y1 - PLOT_Y0) * g / 4;
-        uint16_t c = be16(g == 0 ? COLOR_GREY : COLOR_DKGREY);
+        uint16_t c = be16(g == 0 ? COLOR_GREY : COLOR_LTGREY);
         for (int x = PLOT_X0; x <= PLOT_X1; x++) {
+            if (g != 0 && ((x - PLOT_X0) % 6) >= 3) {
+                continue;
+            }
             s_envbuf[y * ENV_W + x] = c;
         }
     }
     for (int g = 0; g <= 4; g++) {
         int x = PLOT_X0 + (PLOT_X1 - PLOT_X0) * g / 4;
-        uint16_t c = be16(g == 0 ? COLOR_GREY : COLOR_DKGREY);
+        uint16_t c = be16(g == 0 ? COLOR_GREY : COLOR_LTGREY);
         for (int y = PLOT_Y0; y <= PLOT_Y1; y++) {
+            if (g != 0 && ((y - PLOT_Y0) % 6) >= 3) {
+                continue;
+            }
             s_envbuf[y * ENV_W + x] = c;
         }
     }
 
-    /* Y 轴刻度：满量程 / 半量程 / 0（单位 A） */
-    int fs_a = (int)(4095 * CURRENT_A_PER_COUNT);
+    /* Y 轴自动量程：按本次峰值挑一个 5/10 的整数倍，留约 12% 余量 */
+    int peak_a = (int)(s->env_peak * CURRENT_A_PER_COUNT + 0.5f);
+    int fs_a   = nice_full_scale(peak_a);
     char lbl[16];
     snprintf(lbl, sizeof(lbl), "%d", fs_a);
     env_text(2, PLOT_Y0 - 1, lbl, COLOR_GREY);
@@ -372,7 +391,12 @@ static void env_render(const app_state_t *s)
     int prev_y = PLOT_Y1;
     for (int i = 0; i < ENV_BUCKETS; i++) {
         int x = PLOT_X0 + (PLOT_X1 - PLOT_X0) * i / (ENV_BUCKETS - 1);
-        int y = PLOT_Y1 - (int)((uint32_t)s->env[i] * (PLOT_Y1 - PLOT_Y0) / 4095u);
+        uint32_t val = (uint32_t)((float)s->env[i] * CURRENT_A_PER_COUNT + 0.5f);
+        int h = (int)((uint64_t)val * (uint32_t)(PLOT_Y1 - PLOT_Y0) / (uint32_t)fs_a);
+        if (h > (PLOT_Y1 - PLOT_Y0)) {
+            h = PLOT_Y1 - PLOT_Y0;
+        }
+        int y = PLOT_Y1 - h;
         int y0 = prev_y < y ? prev_y : y;
         int y1 = prev_y < y ? y : prev_y;
         uint16_t c = be16(COLOR_CYAN);
@@ -418,30 +442,61 @@ static void draw_count(uint32_t count)
     draw_text(180, STATUS_Y + 4, 2, buf, COLOR_WHITE);
 }
 
-static void draw_peak(int32_t peak10)
+/* 电流：峰值（红）与有效（蓝）并排 */
+static void fmt_a(char *buf, size_t n, int32_t v10)
 {
-    char buf[16];
-    if (peak10 >= 1000) {
-        snprintf(buf, sizeof(buf), "%ld", (long)(peak10 / 10));
+    if (v10 < 0) {
+        snprintf(buf, n, "---");
+    } else if (v10 >= 1000) {
+        snprintf(buf, n, "%ld", (long)(v10 / 10));
     } else {
-        snprintf(buf, sizeof(buf), "%ld.%ld", (long)(peak10 / 10), (long)(peak10 % 10));
+        snprintf(buf, n, "%ld.%ld", (long)(v10 / 10), (long)(v10 % 10));
     }
-
-    fill_rect(0, PEAK_LABEL_Y, LCD_H_RES, PEAK_NUM_Y + PEAK_H - PEAK_LABEL_Y, COLOR_BLACK);
-    draw_cn_text(MARGIN_X, PEAK_LABEL_Y, "峰值电流", COLOR_GREY);
-
-    draw_number_right(PEAK_RIGHT, PEAK_NUM_Y, PEAK_W, PEAK_H, PEAK_T, buf, COLOR_CYAN);
-    draw_text(PEAK_UNIT_X, PEAK_NUM_Y + PEAK_H - 16, 2, "A", COLOR_GREY);
 }
 
-static void draw_info(int32_t t10, int32_t rms10)
+static void draw_currents(int32_t peak10, int32_t rms10)
 {
     char buf[16];
 
-    fill_rect(0, INFO_Y, LCD_H_RES, BOT_H + 2, COLOR_BLACK);
+    fill_rect(0, PEAK_LABEL_Y, LCD_H_RES, PEAK_NUM_Y + PEAK_NUM_H + 2 - PEAK_LABEL_Y, COLOR_BLACK);
 
-    /* 左：温度 */
-    draw_cn_text(MARGIN_X, INFO_Y, "温度", COLOR_GREY);
+    draw_cn_text(MARGIN_X, PEAK_LABEL_Y, "峰值电流", COLOR_GREY);
+    fmt_a(buf, sizeof(buf), peak10);
+    draw_number_right(112, PEAK_NUM_Y, 13, PEAK_NUM_H, 3, buf, COLOR_RED);
+    draw_text(116, PEAK_NUM_Y + 18, 2, "A", COLOR_GREY);
+
+    draw_cn_text(126, PEAK_LABEL_Y, "有效电流", COLOR_GREY);
+    fmt_a(buf, sizeof(buf), rms10);
+    draw_number_right(222, PEAK_NUM_Y, 13, PEAK_NUM_H, 3, buf, COLOR_BLUE);
+    draw_text(226, PEAK_NUM_Y + 18, 2, "A", COLOR_GREY);
+}
+static void draw_pulses(int32_t p1_10, int32_t p2_10, int32_t sel)
+{
+    char buf[16];
+
+    fill_rect(0, SET_Y, LCD_H_RES, SET_H + 4, COLOR_BLACK);
+
+    draw_cn_text(MARGIN_X, SET_Y, "脉冲", COLOR_GREY);
+    draw_text(MARGIN_X + 34, SET_Y + 1, 2, "1", COLOR_GREY);
+    snprintf(buf, sizeof(buf), "%ld.%ld", (long)(p1_10 / 10), (long)(p1_10 % 10));
+    draw_number_right(106, SET_Y, 12, SET_H, 2, buf, sel == 0 ? COLOR_CYAN : COLOR_WHITE);
+    draw_text(110, SET_Y + 4, 1, "ms", COLOR_DKGREY);
+
+    draw_cn_text(126, SET_Y, "脉冲", COLOR_GREY);
+    draw_text(126 + 34, SET_Y + 1, 2, "2", COLOR_GREY);
+    snprintf(buf, sizeof(buf), "%ld.%ld", (long)(p2_10 / 10), (long)(p2_10 % 10));
+    draw_number_right(222, SET_Y, 12, SET_H, 2, buf, sel == 1 ? COLOR_CYAN : COLOR_WHITE);
+    draw_text(226, SET_Y + 4, 1, "ms", COLOR_DKGREY);
+}
+
+/* 第二行：温度 / 电容组电压 */
+static void draw_bottom(int32_t t10, int32_t v10)
+{
+    char buf[16];
+
+    fill_rect(0, PULSE_Y, LCD_H_RES, BOT_H + 2, COLOR_BLACK);
+
+    draw_cn_text(MARGIN_X, PULSE_Y, "温度", COLOR_GREY);
     if (t10 <= -900) {
         snprintf(buf, sizeof(buf), "---");
     } else if (t10 < 0) {
@@ -449,30 +504,20 @@ static void draw_info(int32_t t10, int32_t rms10)
     } else {
         snprintf(buf, sizeof(buf), "%ld.%ld", (long)(t10 / 10), (long)(t10 % 10));
     }
-    draw_number_right(104, INFO_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
-    draw_text(108, INFO_Y + 2, 1, "C", COLOR_GREY);
+    draw_number_right(104, PULSE_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
+    draw_text(108, PULSE_Y + 2, 1, "C", COLOR_DKGREY);
 
-    /* 右：有效电流 */
-    draw_cn_text(124, INFO_Y, "有效", COLOR_GREY);
-    if (rms10 >= 1000) {
-        snprintf(buf, sizeof(buf), "%ld", (long)(rms10 / 10));
+    draw_cn_text(124, PULSE_Y, "电压", COLOR_GREY);
+    if (v10 > 0) {
+        snprintf(buf, sizeof(buf), "%ld.%ld", (long)(v10 / 10), (long)(v10 % 10));
+        draw_number_right(218, PULSE_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
     } else {
-        snprintf(buf, sizeof(buf), "%ld.%ld", (long)(rms10 / 10), (long)(rms10 % 10));
+        draw_text(190, PULSE_Y + 7, 1, "--", COLOR_DKGREY);
     }
-    draw_number_right(222, INFO_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
-    draw_text(226, INFO_Y + 2, 1, "A", COLOR_GREY);
+    draw_text(222, PULSE_Y + 2, 1, "V", COLOR_DKGREY);
 }
 
-static void draw_pulse(int32_t p10)
-{
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%ld.%ld", (long)(p10 / 10), (long)(p10 % 10));
 
-    fill_rect(0, PULSE_Y, LCD_H_RES, BOT_H + 2, COLOR_BLACK);
-    draw_cn_text(MARGIN_X, PULSE_Y, "脉宽", COLOR_GREY);
-    draw_number_right(190, PULSE_Y, 11, BOT_H, 3, buf, COLOR_WHITE);
-    draw_text(195, PULSE_Y + 2, 1, "ms", COLOR_GREY);
-}
 
 /* ------------------------------------------------------------ 初始化 */
 
@@ -539,9 +584,13 @@ void display_render(const app_state_t *s)
     static int32_t  last_status = -1;
     static int32_t  last_count  = -1;
     static int32_t  last_peak   = -1;
-    static int32_t  last_temp   = -1;
     static int32_t  last_rms    = -1;
-    static int32_t  last_pulse  = -1;
+    static int32_t  last_rms2   = -1;
+    static int32_t  last_temp   = -1;
+    static int32_t  last_volt   = -1;
+    static int32_t  last_p1     = -1;
+    static int32_t  last_p2     = -1;
+    static int32_t  last_sel    = -1;
     static uint32_t last_seq    = 0xFFFFFFFF;
 
     int32_t status = s->temp_locked ? 2 : (s->welding ? 1 : 0);
@@ -558,24 +607,29 @@ void display_render(const app_state_t *s)
         last_count = count;
     }
 
-    int32_t peak10 = s->env_valid ? (int32_t)(s->env_peak * CURRENT_A_PER_COUNT * 10.0f + 0.5f) : 0;
-    if (peak10 != last_peak) {
-        draw_peak(peak10);
+    int32_t peak10 = s->env_valid ? (int32_t)(s->env_peak * CURRENT_A_PER_COUNT * 10.0f + 0.5f) : -1;
+    int32_t rms10  = s->env_valid ? (int32_t)(s->env_rms  * CURRENT_A_PER_COUNT * 10.0f + 0.5f) : -1;
+    if (peak10 != last_peak || rms10 != last_rms) {
+        draw_currents(peak10, rms10);
         last_peak = peak10;
-    }
-
-    int32_t t10   = (s->temp_c > -100.0f) ? (int32_t)(s->temp_c * 10.0f) : -999;
-    int32_t rms10 = s->env_valid ? (int32_t)(s->env_rms * CURRENT_A_PER_COUNT * 10.0f + 0.5f) : 0;
-    if (t10 != last_temp || rms10 != last_rms) {
-        draw_info(t10, rms10);
-        last_temp = t10;
         last_rms  = rms10;
     }
 
-    int32_t p10 = (int32_t)(s->pulse_us / 100);
-    if (p10 != last_pulse) {
-        draw_pulse(p10);
-        last_pulse = p10;
+    int32_t p1_10 = (int32_t)(s->pulse1_us / 100);
+    int32_t p2_10 = (int32_t)(s->pulse2_us / 100);
+    if (p1_10 != last_p1 || p2_10 != last_p2 || s->pulse_sel != last_sel) {
+        draw_pulses(p1_10, p2_10, s->pulse_sel);
+        last_p1   = p1_10;
+        last_p2   = p2_10;
+        last_sel  = s->pulse_sel;
+    }
+
+    int32_t t10 = (s->temp_c > -100.0f) ? (int32_t)(s->temp_c * 10.0f) : -999;
+    int32_t v10 = (s->cap_mv > 0) ? (int32_t)(s->cap_mv / 100) : -1;
+    if (t10 != last_temp || v10 != last_volt) {
+        draw_bottom(t10, v10);
+        last_temp = t10;
+        last_volt = v10;
     }
 
     if (s->env_seq != last_seq) {
@@ -588,7 +642,7 @@ void display_render(const app_state_t *s)
 /* ------------------------------------------------------------ 开机动画 */
 
 #define ANIM_BAND 40
-_Static_assert(ANIM_BAND * 240 <= 240 * 84, "band exceeds env buffer");
+_Static_assert(ANIM_BAND * 240 <= ENV_W * ENV_H, "band exceeds env buffer");
 
 void display_boot_anim(void)
 {

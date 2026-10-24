@@ -28,9 +28,11 @@ static bool          s_capturing;
 static uint32_t      s_sample_idx;
 static uint64_t      s_sum_sq;
 static uint32_t      s_n;
+static uint32_t      s_p2_start;   /* 正式脉冲起始样本序号 */
 static uint32_t      s_capture_samples = ENV_CAPTURE_SAMPLES;
 static uint32_t      s_window_us       = ENV_CAPTURE_MS * 1000;
 static uint16_t      s_buckets[ENV_BUCKETS];
+static uint16_t      s_peak1;   /* 预热脉冲峰值 */
 
 /* NTC 平均 */
 static uint32_t s_ntc_sum;
@@ -123,7 +125,8 @@ static void finish_capture(void)
     }
     memcpy(s->env, s_buckets, sizeof(s->env));
     s->env_rms = (uint16_t)rms;
-    s->env_peak = peak;
+    s->env_peak  = peak;
+    s->env_peak1 = s_peak1;
     s->env_peak_idx = peak_idx;
     s->env_valid = true;
     s->env_seq++;
@@ -144,6 +147,7 @@ static void feed_current(uint32_t raw)
     if (!s_capturing) {
         s_capturing = true;
         s_sample_idx = 0;
+        s_peak1 = 0;
         memset(s_buckets, 0, sizeof(s_buckets));
         s_sum_sq = 0;
         s_n = 0;
@@ -154,11 +158,19 @@ static void feed_current(uint32_t raw)
     if (idx >= ENV_BUCKETS) {
         idx = ENV_BUCKETS - 1;
     }
-    s_sum_sq += (uint64_t)raw * raw;
-    s_n++;
+    /* 有效值只统计正式脉冲（P2），不含预热脉冲和间隔 */
+    if (s_sample_idx >= s_p2_start) {
+        s_sum_sq += (uint64_t)raw * raw;
+        s_n++;
+    }
 
     if (raw > s_buckets[idx]) {
         s_buckets[idx] = (uint16_t)raw;
+    }
+    if (s_sample_idx < s_p2_start) {
+        if (raw > s_peak1) {
+            s_peak1 = (uint16_t)raw;
+        }
     }
 
     s_sample_idx++;
@@ -236,7 +248,7 @@ void current_sense_arm(void)
     const uint32_t MIN_US    = 2000;
     const uint32_t MAX_US    = 60000;
 
-    uint32_t win = weld_get_pulse_us() + MARGIN_US;
+    uint32_t win = weld_get_capture_us();
     if (win < MIN_US) { win = MIN_US; }
     if (win > MAX_US) { win = MAX_US; }
 
@@ -247,6 +259,11 @@ void current_sense_arm(void)
     s_sample_idx = 0;
     s_capturing  = false;
     s_armed      = true;
+
+    /* P2 开始时刻 = 预压结束后经过 P1 + 间隔，换算成样本序号 */
+    uint32_t per_ch_hz = ADC_SAMPLE_FREQ_HZ / 2;
+    uint32_t p2_us     = weld_get_pulse_us(0) + WELD_GAP_US;
+    s_p2_start = (uint32_t)((uint64_t)p2_us * per_ch_hz / 1000000ULL);
 }
 
 void current_sense_init(void)

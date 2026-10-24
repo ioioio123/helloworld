@@ -49,13 +49,53 @@ static void ui_task(void *arg)
     app_state_t snap;
 
     for (;;) {
+        static int32_t sel = 0;
+        static bool    btn_down = false;
+        static int64_t btn_down_us = 0;
+        static bool    long_done = false;
+
         int32_t steps = encoder_take_steps();
         (void)encoder_take_clicks();
+
+        if (steps != 0) {
+            int32_t next = (int32_t)weld_get_pulse_us(sel) + steps * 500;
+            if (next < 1000) {
+                next = 1000;
+            } else if (next > 48000) {
+                next = 48000;
+            }
+            weld_set_pulse_us(sel, (uint32_t)next);
+            ESP_LOGI(TAG, "旋钮 P%d steps=%d -> %d.%d ms", sel + 1, (int)steps,
+                     (int)(next / 1000), (int)((next % 1000) / 100));
+        }
+
+        bool pressed = encoder_switch_pressed();
+        int64_t now_us = esp_timer_get_time();
+        if (pressed && !btn_down) {
+            btn_down = true;
+            btn_down_us = now_us;
+            long_done = false;
+        } else if (pressed && btn_down && !long_done && (now_us - btn_down_us) > 800000) {
+            long_done = true;
+            weld_set_pulse_us(0, WELD_P1_US);
+            weld_set_pulse_us(1, WELD_P2_US);
+            ESP_LOGI(TAG, "长按：恢复默认 P1=%d P2=%d ms", WELD_P1_US / 1000, WELD_P2_US / 1000);
+        } else if (!pressed && btn_down) {
+            btn_down = false;
+            if (!long_done) {
+                sel = !sel;
+                ESP_LOGI(TAG, "切换调节项 -> P%d", sel + 1);
+            }
+        }
 
         app_state_t *s = app_state_lock();
         if (steps) {
             s->knob += steps;
         }
+        s->pulse1_us = weld_get_pulse_us(0);
+        s->pulse2_us = weld_get_pulse_us(1);
+        s->pulse_sel = sel;
+        s->cap_mv    = 0;      /* 电压检测硬件未接 */
         snap = *s;                      /* 加锁拷贝快照 */
         app_state_unlock();
 

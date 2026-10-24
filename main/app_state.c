@@ -8,7 +8,12 @@ void app_state_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
     configASSERT(s_lock);
-    g_state.pulse_us = WELD_PULSE_US;
+    g_state.pulse1_us      = WELD_P1_US;
+    g_state.pulse2_us      = WELD_P2_US;
+    g_state.pulse1_meas_us = 0;
+    g_state.pulse2_meas_us = 0;
+    g_state.pulse_sel      = 0;
+    g_state.cap_mv         = 0;
     g_state.temp_c = -273.0f;
 }
 

@@ -13,7 +13,7 @@ static volatile int64_t s_last_edge_us;
 static portMUX_TYPE s_count_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* EC11 一格约 1~2ms，200us 足以滤掉触点抖动又不会吞掉快速旋转 */
-#define EDGE_DEBOUNCE_US 200
+#define EDGE_DEBOUNCE_US 500
 
 static void IRAM_ATTR ec11_isr(void *arg)
 {
@@ -26,7 +26,8 @@ static void IRAM_ATTR ec11_isr(void *arg)
     int a = gpio_get_level(PIN_EC11_A);
     int b = gpio_get_level(PIN_EC11_B);
     /* A 相边沿后读 B 相：同相为顺时针，异相为逆时针 */
-    s_count += (a == b) ? 1 : -1;
+    /* 顺时针递增：本编码器实测方向与直觉相反，这里取反 */
+    s_count += (a == b) ? -1 : 1;
 }
 
 int32_t encoder_take_steps(void)
@@ -35,7 +36,14 @@ int32_t encoder_take_steps(void)
     int32_t raw = s_count;
     s_count = 0;
     taskEXIT_CRITICAL(&s_count_mux);
-    return raw / 2;                 /* 一步 = A 相上下沿各一次 */
+
+    /* 实测本编码器每格 2 个边沿。用余数累积折算成「格」，
+     * 避免整数除法把落单的边沿永久丢掉。 */
+    static int32_t residual;
+    residual += raw;
+    int32_t steps = residual / 2;
+    residual -= steps * 2;
+    return steps;
 }
 
 bool encoder_switch_pressed(void)

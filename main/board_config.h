@@ -33,7 +33,8 @@
 #define PIN_EC11_SW         GPIO_NUM_21
 
 /* GPIO4/5/6/7：ST7789 SPI（RES 与 BLK 硬连 3.3V，故无复位脚、无背光脚） */
-#define PIN_LCD_SCLK        GPIO_NUM_4
+/* 板载 LED 已弃用：GPIO8 改作 LCD 时钟，GPIO4 留给电容电压采样（待打板） */
+#define PIN_LCD_SCLK        GPIO_NUM_8
 #define PIN_LCD_MOSI        GPIO_NUM_5
 #define PIN_LCD_CS          GPIO_NUM_6
 #define PIN_LCD_DC          GPIO_NUM_7
@@ -79,7 +80,10 @@
 /* ============================ 安全参数 ============================ */
 
 #define WELD_PRECHARGE_US   (200 * 1000)    /* 预压 200ms */
-#define WELD_PULSE_US       (10 * 1000)     /* 标称导通 10ms */
+#define WELD_PULSE_US       (10 * 1000)     /* 兼容旧代码 */
+#define WELD_P1_US          (5 * 1000)      /* 脉冲1 预热，默认 5ms */
+#define WELD_P2_US          (10 * 1000)     /* 脉冲2 焊接，默认 10ms */
+#define WELD_GAP_US         (15 * 1000)     /* 双脉冲间隔，固定 15ms */
 #define WELD_MAX_PULSE_US   (50 * 1000)     /* 硬上限 50ms，独立看门狗 */
 #define WELD_COOLDOWN_US    (1000 * 1000)   /* 冷却 1s */
 #define WELD_TEMP_LIMIT_C   80.0f           /* 超温禁止触发 */
@@ -109,9 +113,11 @@
 #define COLOR_WHITE   RGB565(31, 63, 31)
 #define COLOR_GREY    RGB565(12, 24, 12)
 #define COLOR_DKGREY  RGB565(6, 12, 6)
+#define COLOR_LTGREY  RGB565(19, 38, 19)
 #define COLOR_RED     RGB565(31, 0, 0)
 #define COLOR_GREEN   RGB565(0, 63, 0)
 #define COLOR_CYAN    RGB565(0, 48, 31)
+#define COLOR_BLUE    RGB565(0, 20, 31)
 #define COLOR_YELLOW  RGB565(31, 63, 0)
 #define COLOR_ORANGE  RGB565(31, 32, 0)
 
